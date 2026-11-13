@@ -9,15 +9,18 @@
 // word (X, Y, pen down, hinge: HW_BUTTON_XY_BUF, active low but the hinge).
 // Scripted presses from debug.txt ("press <frame> <A|B|X|Y|L|R|START|SELECT|UP|DOWN|LEFT|RIGHT>"),
 // each held for 8 frames: for testing without hands on the buttons.
-typedef struct { u32 frame; u16 key; u16 xy; } Press;
+typedef struct { u32 frame, until, period; u16 key; u16 xy; } Press;
 static Press sPress[64];
 static int sNumPress;
-void port_input_script(u32 frame, const char *name) {
+// "press F KEY": KEY held for 8 frames from frame F; "mash F T P KEY": the same every P frames from F to T.
+void port_input_mash(u32 frame, u32 until, u32 period, const char *name);
+void port_input_script(u32 frame, const char *name) { port_input_mash(frame, frame + 1, 0, name); }
+void port_input_mash(u32 frame, u32 until, u32 period, const char *name) {
     static const struct { const char *n; u16 key, xy; } k[] = {
         { "A", 1, 0 }, { "B", 2, 0 }, { "SELECT", 4, 0 }, { "START", 8, 0 }, { "RIGHT", 16, 0 }, { "LEFT", 32, 0 },
-        { "UP", 64, 0 }, { "DOWN", 128, 0 }, { "R", 256, 0 }, { "L", 512, 0 }, { "X", 0, 1 }, { "Y", 0, 2 } };
+        { "UP", 64, 0 }, { "DOWN", 128, 0 }, { "R", 256, 0 }, { "L", 512, 0 }, { "X", 0, 0x400 }, { "Y", 0, 0x800 } };
     for (size_t i = 0; i < sizeof(k) / sizeof(k[0]) && sNumPress < 64; i++) {
-        if (!strcmp(k[i].n, name)) { sPress[sNumPress++] = (Press){ frame, k[i].key, k[i].xy }; return; }
+        if (!strcmp(k[i].n, name)) { sPress[sNumPress++] = (Press){ frame, until, period, k[i].key, k[i].xy }; return; }
     }
 }
 
@@ -25,7 +28,10 @@ void port_input_update(void) {
     u16 keyinput, xy;
     port_ctr_buttons(&keyinput, &xy);
     for (int i = 0; i < sNumPress; i++) {
-        if (port_frame_count >= sPress[i].frame && port_frame_count < sPress[i].frame + 8) {
+        const Press *p = &sPress[i];
+        if (port_frame_count < p->frame || port_frame_count >= p->until + 8) continue;
+        u32 ph = p->period ? (port_frame_count - p->frame) % p->period : port_frame_count - p->frame;
+        if (ph < 8) {
             keyinput &= (u16)~sPress[i].key;
             xy &= (u16)~sPress[i].xy;
         }
@@ -158,4 +164,18 @@ int PXI_SendWordByFifo(int fifotag, u32 data, BOOL err) {
     (void)data; (void)err;
     if (fifotag == PXI_FIFO_TAG_SOUND && SNDi_SharedWork) SNDi_SharedWork->finishCommandTag++;
     return 0;
+}
+
+// ---------------------------------------------------------------- wireless driver (WVR)
+// The game loads the DS wireless driver into VRAM at its menus (and only then talks to WM, whose
+// calls fail as if no partner is there). Loading it succeeds at once: the callback runs before
+// the call returns "operating", which is what the game's state flags expect.
+WVRResult WVR_StartUpAsync(GXVRamARM7 vram, WVRCallbackFunc callback, void *arg) {
+    (void)vram;
+    if (callback) callback(arg, WVR_RESULT_SUCCESS);
+    return WVR_RESULT_OPERATING;
+}
+WVRResult WVR_TerminateAsync(WVRCallbackFunc callback, void *arg) {
+    if (callback) callback(arg, WVR_RESULT_SUCCESS);
+    return WVR_RESULT_OPERATING;
 }

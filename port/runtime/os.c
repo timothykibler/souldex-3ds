@@ -20,11 +20,15 @@ OSIntrMode OS_RestoreInterrupts(OSIntrMode state) { OSIntrMode m = sIntrMode; sI
 OSIntrMode OS_DisableInterrupts_IrqAndFiq(void) { return OS_DisableInterrupts(); }
 OSIntrMode OS_RestoreInterrupts_IrqAndFiq(OSIntrMode state) { return OS_RestoreInterrupts(state); }
 OSIntrMode_Irq OS_GetCpsrIrq(void) { return (OSIntrMode_Irq)sIntrMode; }
-OSProcMode OS_GetProcMode(void) { return OS_PROCMODE_SYS; }
+static int sInIrq;  // inside the VBlank handler (as an interrupt)
+OSProcMode OS_GetProcMode(void) { return sInIrq ? OS_PROCMODE_IRQ : OS_PROCMODE_SYS; }
 void OS_IrqHandler(void) {}
 void OS_Halt(void) { port_frame(); }
 void OS_SpinWait(u32 cycle) { (void)cycle; }
-void OS_Terminate(void) { port_fatal("OS_Terminate"); }
+void OS_Terminate(void) {
+    // (the caller, and the one before it if frame pointers allow: look them up in soulsilver.map)
+    port_fatal("OS_Terminate from %p (lr), %p", __builtin_return_address(0), __builtin_extract_return_addr(__builtin_return_address(0)));
+}
 
 // The interrupt check flag the VBlank handlers set (HW_INTR_CHECK_BUF, at the end of DTCM)
 #define INTR_CHECK (*(vu32 *)HW_INTR_CHECK_BUF)
@@ -36,6 +40,21 @@ static void run_alarms(void);
 static u64 renderTicks;
 
 void port_input_update(void);
+
+// The VBlank interrupt during long work (loading): on the DS it fires every 16.7 ms wherever the
+// game is, and the game relies on it (the field queues more one-off VBlank tasks while loading
+// than its queue holds: they drain as it goes). Called at points where the game waits on the
+// card; runs the game's VBlank handler if a frame's time has passed and interrupts are enabled.
+static u64 sLastVblank;
+void port_vblank_irq_maybe(void) {
+    if (sInIrq || sIntrMode == OS_INTRMODE_IRQ_DISABLE || !sLastVblank) return;
+    u64 now = port_ctr_ticks();
+    if (now - sLastVblank < 268111856ull / 60) return;
+    sLastVblank = now;
+    OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
+    if (vblank) { sInIrq = 1; vblank(); sInIrq = 0; }
+    INTR_CHECK |= OS_IE_V_BLANK;
+}
 
 void port_frame(void) {
     if (!port_ctr_frame_wait()) port_ctr_exit(0);
@@ -61,12 +80,15 @@ void port_frame(void) {
         gProfBg = gProfObj = gProfMix = 0;
     }
     port_input_update();
+    extern void port_wm_frame(void);
+    port_wm_frame();
     run_alarms();
     // The game's VBlank handler (OS_SetIrqFunction(OS_IE_V_BLANK, ...)): it does the frame's
     // transfers and sets the interrupt check flag the main loop waits for.
     OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
-    if (vblank) vblank();
+    if (vblank && !sInIrq) { sInIrq = 1; vblank(); sInIrq = 0; }
     INTR_CHECK |= OS_IE_V_BLANK;
+    sLastVblank = port_ctr_ticks();
     // The frame the DS would now scan out: drawn from the state after the VBlank transfers, on the
     // render core while the game runs its next frame (shown a frame later), or here if there's none.
     extern int port_g3_vblank(void);
@@ -81,6 +103,8 @@ void port_frame(void) {
         void port_dump_screens(const u16 *, const u16 *, u32);
         port_gpu2d_readback(top, bottom);
         port_dump_screens(top, bottom, port_frame_count);
+        void port_gpu2d_dump_full(u32 frame);
+        port_gpu2d_dump_full(port_frame_count);
         // the software renderer's picture of the same frame, and how far apart they are
         static u16 stop[256 * 192], sbot[256 * 192];
         port_render2d(stop, sbot);

@@ -56,7 +56,7 @@ static void setup_system_area(void) {
     // No buttons held yet (they're active low: an all-zero register is every button down, which
     // includes the START+SELECT+L+R soft reset).
     *(volatile u16 *)(0x04000130 + PORT_DS_DELTA) = 0x03FF;
-    *(volatile u16 *)(0x027FFFA8 + PORT_DS_DELTA) = 0x0043;
+    *(volatile u16 *)(0x027FFFA8 + PORT_DS_DELTA) = 0x0C00;  // (HW_BUTTON_XY_BUF: X, Y up, hinge open)
 }
 
 extern void NitroMain(void);
@@ -82,11 +82,16 @@ int main(void) {
         extern uint32_t port_dump_every;
         char line[64];
         while (fgets(line, sizeof(line), dbg)) {
-            unsigned n;
+            unsigned n, m, per;
             char key[16];
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
+            else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (!strncmp(line, "test3d", 6)) { extern uint32_t port_test3d, port_trace3d; port_test3d = 1; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
+            else if (sscanf(line, "mash %u %u %u %15s", &n, &m, &per, key) == 4) {
+                void port_input_mash(uint32_t frame, uint32_t until, uint32_t period, const char *name);
+                port_input_mash(n, m, per, key);
+            }
             else if (sscanf(line, "press %u %15s", &n, key) == 2) {
                 void port_input_script(uint32_t frame, const char *name);
                 port_input_script(n, key);

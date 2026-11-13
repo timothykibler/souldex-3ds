@@ -45,6 +45,8 @@ bool port_rom_open(void) {
 uint32_t port_rom_size(void) { return sRomSize; }
 
 void port_rom_read(uint32_t offset, void *dst, uint32_t len) {
+    void port_vblank_irq_maybe(void);
+    port_vblank_irq_maybe();
     if (fseek(sRom, offset, SEEK_SET) != 0 || fread(dst, 1, len, sRom) != len) {
         port_fatal("ROM read failed: %lu bytes at %08lX", len, offset);
     }
@@ -131,6 +133,7 @@ BOOL CARDi_RequestStreamCommand(u32 src, u32 dst, u32 len, MIDmaCallback callbac
     case CARD_REQ_READ_BACKUP:  // src: save offset, dst: memory
         if (src + len > SAVE_SIZE) { sResult = CARD_RESULT_INVALID_PARAM; break; }
         memcpy((void *)dst, sSave + src, len);
+        port_log("card: read %lX+%lX -> %08lX\n", (unsigned long)src, (unsigned long)len, (unsigned long)dst);
         break;
     case CARD_REQ_WRITE_BACKUP:
     case CARD_REQ_PROGRAM_BACKUP:  // src: memory, dst: save offset

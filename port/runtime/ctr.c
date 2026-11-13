@@ -29,10 +29,11 @@ void port_ctr_buttons(uint16_t *keyinput, uint16_t *xy) {
     for (int i = 0; i < 10; i++) {
         if (k & map[i]) in &= (uint16_t)~(1u << i);
     }
-    uint16_t x = 0x0043;  // X, Y and the pen up; hinge open
-    if (k & KEY_X) x &= (uint16_t)~0x0001;
-    if (k & KEY_Y) x &= (uint16_t)~0x0002;
-    if (k & KEY_TOUCH) x &= (uint16_t)~0x0040;
+    // HW_BUTTON_XY_BUF as the SDK's ARM7 leaves it: already in PAD_Read's bit positions (X 0x400,
+    // Y 0x800, active low; hinge closed 0x8000), since PAD_Read ORs it straight into KEYINPUT.
+    uint16_t x = 0x0C00;  // X and Y up, hinge open
+    if (k & KEY_X) x &= (uint16_t)~0x0400;
+    if (k & KEY_Y) x &= (uint16_t)~0x0800;
     *keyinput = in;
     *xy = x;
 }

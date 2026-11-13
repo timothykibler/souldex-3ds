@@ -83,7 +83,7 @@ def archives():
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
-           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map",
+           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail",
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]
     return subprocess.run(cmd, capture_output=True, text=True), elf

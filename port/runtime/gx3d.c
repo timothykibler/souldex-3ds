@@ -14,6 +14,8 @@
 #include "port_ds.h"
 #include "port.h"
 
+extern float port_g3_wide, port_g3_wide_y;
+
 typedef int32_t s32;
 typedef int64_t s64;
 typedef uint32_t u32;
@@ -236,8 +238,11 @@ static void box_test(const u32 *p) {
         s64 vx = x + ((c & 1) ? w : 0), vy = y + ((c & 2) ? h : 0), vz = z + ((c & 4) ? d : 0);
         s64 cl[4];
         for (int k = 0; k < 4; k++) cl[k] = vx * sClip[k] + vy * sClip[4 + k] + vz * sClip[8 + k] + ((s64)sClip[12 + k] << 12);
-        outside[0] &= cl[0] < -cl[3]; outside[1] &= cl[0] > cl[3];
-        outside[2] &= cl[1] < -cl[3]; outside[3] &= cl[1] > cl[3];
+        // (x against the widened view: what shows at the sides of the top screen is drawn too)
+        s64 wx = port_g3_wide > 1.0f ? (s64)(cl[3] * port_g3_wide) : cl[3];
+        s64 wy = port_g3_wide_y > 1.0f ? (s64)(cl[3] * port_g3_wide_y) : cl[3];
+        outside[0] &= cl[0] < -wx; outside[1] &= cl[0] > wx;
+        outside[2] &= cl[1] < -wy; outside[3] &= cl[1] > wy;
         outside[4] &= cl[2] < -cl[3]; outside[5] &= cl[2] > cl[3];
     }
     int vis = !(outside[0] | outside[1] | outside[2] | outside[3] | outside[4] | outside[5]);
@@ -368,8 +373,8 @@ static void run_cmd(u8 cmd, const u32 *p) {
     case 0x26: add_vertex((int16_t)p[0], sVy, (int16_t)(p[0] >> 16)); break;
     case 0x27: add_vertex(sVx, (int16_t)p[0], (int16_t)(p[0] >> 16)); break;
     case 0x28:
-        // (differences in eighths of VTX_10's unit: 0.9 fixed point, << 3 to 4.12)
-        add_vertex(sVx + (((s32)(p[0] << 22) >> 22) << 3), sVy + (((s32)(p[0] << 12) >> 22) << 3), sVz + (((s32)(p[0] << 2) >> 22) << 3));
+        // (1.0.9 differences scaled by 1/8: the raw 10-bit value is already in 4.12 units)
+        add_vertex(sVx + ((s32)(p[0] << 22) >> 22), sVy + ((s32)(p[0] << 12) >> 22), sVz + ((s32)(p[0] << 2) >> 22));
         break;
     case 0x29: sPolyAttrNext = p[0]; break;
     case 0x2A: sTexImage = p[0]; sTs = sS; sTt = sT; break;
@@ -500,6 +505,18 @@ int port_g3_vblank(void) {
         const G3Frame *f = &sFrames[!sBuild];
         int shown = 0;
         port_log("frame: %lu polygons, %lu vertices\n", (unsigned long)f->np, (unsigned long)f->nv);
+        for (u32 pi = 0; pi < f->np; pi++) {
+            const G3Poly *p = &f->p[pi];
+            float x0 = 9, y0 = 9, x1 = -9, y1 = -9, z0 = 9, z1 = -9;
+            for (u32 k = 0; k < p->count; k++) {
+                const G3Vtx *v = &f->v[p->first + k];
+                if (v->w <= 0) continue;
+                float x = v->x / v->w, y = v->y / v->w, z = v->z / v->w;
+                if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+            }
+            port_log("  P%lu attr %08lX tex %08lX pltt %04lX n %lu x %.2f..%.2f y %.2f..%.2f z %.3f..%.3f a %u\n", (unsigned long)pi, (unsigned long)p->polyattr,
+                     (unsigned long)p->teximage, (unsigned long)p->pltt, (unsigned long)p->count, x0, x1, y0, y1, z0, z1, f->v[p->first].a);
+        }
         for (u32 pi = 0; pi < f->np && shown < 30; pi++) {
             const G3Poly *p = &f->p[pi];
             for (u32 k = 0; k < p->count; k += 3) {

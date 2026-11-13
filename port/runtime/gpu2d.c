@@ -15,10 +15,12 @@
 // mid-frame (H-blank) effects.
 #include <3ds.h>
 #include <citro3d.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "port_ds.h"
 #include "port.h"
+#include "gx3d.h"
 
 #define DS(a) ((u8 *)(uintptr_t)((a) + PORT_DS_DELTA))
 static inline u16 rd16(const u8 *p) { return (u16)(p[0] | p[1] << 8); }
@@ -37,7 +39,20 @@ typedef struct { float x, y, u, v; } Vtx;
 #define MAX_VTX (64 * 1024)
 static Vtx *sVbo;
 static int sVtxUsed;
-static float sOX, sOY;  // where the DS screen sits on the 3DS screen
+static float sOX, sOY;  // (offset added to every quad: 0, the projection places the DS picture)
+
+// Screen layout. The DS picture is shown 1:1 (exact pixels) in the middle of each screen. On the
+// top screen the 3D layer can be widened to fill all of it (400x240): the DS frustum is extended
+// on both axes (clip x scaled by 256/400, y by 192/240), so what's inside the DS frame lands
+// exactly where it would, at the same scale as the 2D, and the border shows more of the scene.
+int port_wide_mode = 1;    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
+float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
+static const float sScale = 1.0f;
+static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
+static int sScrW;             // its width in screen pixels
+static int sWide;             // this frame's 3D layer is widened
+static void scissor_ds(int whole);
+static void layout(int screenW);
 
 static void quad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1) {
     if (sVtxUsed + 6 > MAX_VTX) return;
@@ -532,15 +547,17 @@ static void draw_layer(const Mix *mx, int layerBit, int semi, void (*draw)(void 
 typedef struct { const Eng *e; int bg; Plane *p; int kind; } BgDraw;
 static C3D_Tex s3dTex;
 static int s3dHave;
-static void render3d(void);
+static void render3d(int screenW);
 static bool init3d(void);
 
 static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
-    if (d->kind == 3) {  // the 3D layer: its image, 1:1
+    if (d->kind == 3) {  // the 3D layer: rendered at the screen's own resolution, the whole screen
         C3D_TexBind(0, &s3dTex);
-        quad(0, 0, 256, 192, 0, 0, 1, 192.0f / 256);
+        if (sWide) scissor_ds(1);
+        quad(sL, sT, sL + sW, sT + sH, 0, 0, sScrW / 512.0f, 240 / 256.0f);
+        if (sWide) scissor_ds(0);
         return;
     }
     Plane *p = d->p;
@@ -669,23 +686,32 @@ static void flat(u32 abgr, int x0, int y0, int x1, int y1) {
     fill(x0, y0, x1, y1);
 }
 
-// The scissor box around the DS picture, in the screen target's own (rotated) coordinates.
-static void scissor_ds(int screenW) {
-    (void)screenW;
-    int x0 = (int)sOX, y0 = (int)sOY;
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, 240 - (y0 + 192), x0, 240 - y0, x0 + 256);
+// The scissor box around the DS picture (or the whole screen), in the screen target's own
+// (rotated) coordinates.
+static void scissor_ds(int whole) {
+    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240, (u32)sScrW); return; }
+    int x0 = (int)(-sL * sScale + 0.5f), y0 = (int)(-sT * sScale + 0.5f);
+    int w = (int)(256 * sScale + 0.5f), h = (int)(192 * sScale + 0.5f);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 - (y0 + h)), (u32)x0, (u32)(240 - y0), (u32)(x0 + w));
+}
+
+static void layout(int screenW) {
+    sScrW = screenW;
+    sW = screenW / sScale; sH = 240 / sScale;
+    sL = -(sW - 256) / 2; sT = -(sH - 192) / 2;
 }
 
 static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     int ei = !e->main;
     e->dispcnt = rd32(e->io);
     C3D_FrameDrawOn(t);
+    layout(screenW);
     C3D_Mtx proj;
-    Mtx_OrthoTilt(&proj, 0, (float)screenW, 240, 0, -1, 1, true);
+    Mtx_OrthoTilt(&proj, sL, sL + sW, sT + sH, sT, -1, 1, true);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
-    sOX = (screenW - 256) / 2.0f;
-    sOY = 24;
-    scissor_ds(screenW);
+    sOX = sOY = 0;
+    int wide3d = e->main && sWide;
+    scissor_ds(0);
     C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);  // (on: the depth-stencil buffer is only written with it)
     C3D_CullFace(GPU_CULL_NONE);
     C3D_AlphaTest(false, GPU_ALWAYS, 0);
@@ -718,7 +744,8 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     // the backdrop, and in the stencil whether it is a second blend target
     C3D_StencilTest(true, GPU_ALWAYS, (mx.second & 0x20) ? 4 : 0, 0, 0xFF);
     C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_REPLACE);
-    flat(bgr8_abgr(backdrop), 0, 0, 256, 192);
+    if (wide3d) { scissor_ds(1); flat(bgr8_abgr(backdrop), (int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
+    else flat(bgr8_abgr(backdrop), 0, 0, 256, 192);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     if (dmode >= 2) { engine_from_software(ei); return; }
     sprites_build(e);
@@ -772,7 +799,8 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
         u8 a = (u8)(f * 255 / 16);
         set_tev(TEV_FLAT, (int)((u32)a << 24 | (m == 1 ? 0xFFFFFF : 0)));
         C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
-        fill(0, 0, 256, 192);
+        if (wide3d) { scissor_ds(1); fill((int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
+        else fill(0, 0, 256, 192);
         blend_off();
     }
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
@@ -831,8 +859,8 @@ void port_gpu2d_frame(void) {
     static Eng a, b;
     a = (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
-    render3d();
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
+    render3d(a_on_top ? 400 : 320);
     C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0x000000FF, 0);
     render_engine(&a, a_on_top ? sTop : sBottom, a_on_top ? 400 : 320);
@@ -858,14 +886,46 @@ void port_gpu2d_readback(u16 *top, u16 *bottom) {
         u16 w, h;
         const u8 *fb = gfxGetFramebuffer(s == 0 ? GFX_TOP : GFX_BOTTOM, GFX_LEFT, &w, &h);
         u16 *out = s == 0 ? top : bottom;
-        int ox = (h - 256) / 2, oy = 24;
+        layout(h);
         for (int y = 0; y < 192; y++) {
             for (int x = 0; x < 256; x++) {
-                const u8 *p = fb + ((x + ox) * 240 + (239 - (y + oy))) * 3;  // (B, G, R)
+                // (the screen pixel at the DS pixel's centre: exactly that pixel under nearest scaling)
+                int sx = (int)((x + 0.5f - sL) * sScale), sy = (int)((y + 0.5f - sT) * sScale);
+                const u8 *p = fb + (sx * 240 + (239 - sy)) * 3;  // (B, G, R)
                 out[y * 256 + x] = (u16)((p[2] >> 3) | (p[1] >> 3) << 5 | (p[0] >> 3) << 10);
             }
         }
     }
+}
+
+// For checking: both screens as shown, at the 3DS's resolution (full_N.bmp: the top screen over
+// the bottom one, centred). Call after port_gpu2d_readback (which makes the screens readable).
+void port_gpu2d_dump_full(u32 frame) {
+    {
+        const G3Frame *g = port_g3_frame();
+        port_log("frame %lu: wide %d BGCNT %04X %04X %04X %04X DISPCNT %08lX DISP3DCNT %04X CLEAR %08lX vp %d,%d,%d,%d\n", (unsigned long)frame, sWide, rd16(DS(0x04000008)), rd16(DS(0x0400000A)), rd16(DS(0x0400000C)), rd16(DS(0x0400000E)), rd32(DS(0x04000000)),
+                 *(volatile u16 *)DS(0x04000060), *(volatile u32 *)DS(0x04000350), g ? g->viewport[0] : -1, g ? g->viewport[1] : -1, g ? g->viewport[2] : -1, g ? g->viewport[3] : -1);
+    }
+    char path[96];
+    snprintf(path, sizeof(path), "sdmc:/3ds/soulsilver-3ds/full_%05lu.bmp", (unsigned long)frame);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    const int W = 400, H = 480, rowb = W * 3, size = 54 + rowb * H;
+    u8 hd[54] = { 'B', 'M' };
+    hd[2] = size; hd[3] = size >> 8; hd[4] = size >> 16; hd[10] = 54; hd[14] = 40;
+    hd[18] = W; hd[19] = W >> 8; hd[22] = H; hd[23] = H >> 8; hd[26] = 1; hd[28] = 24;
+    fwrite(hd, 1, 54, f);
+    static u8 row[400 * 3];
+    for (int y = H - 1; y >= 0; y--) {
+        memset(row, 0, sizeof(row));
+        int s = y >= 240, sy = y % 240;
+        u16 fw, fh;
+        const u8 *fb = gfxGetFramebuffer(s ? GFX_BOTTOM : GFX_TOP, GFX_LEFT, &fw, &fh);
+        int ox = (W - fh) / 2;
+        for (int x = 0; x < fh; x++) memcpy(row + (x + ox) * 3, fb + (x * 240 + (239 - sy)) * 3, 3);
+        fwrite(row, 1, rowb, f);
+    }
+    fclose(f);
 }
 
 // For debugging: an engine's display registers and visible sprites.
@@ -886,7 +946,6 @@ void port_gpu2d_describe(int engine) {
 // The geometry engine's polygons (gx3d.c), drawn into a 256x256 image with depth, which the 2D
 // compositor then shows as BG0. DS textures are decoded from the texture slots (the VRAM banks
 // mapped for textures, read where the game wrote them: through LCDC) into RGBA8 and cached.
-#include "gx3d.h"
 
 extern const u8 poly_shbin[];
 extern const u32 poly_shbin_size;
@@ -926,7 +985,7 @@ static bool init3d(void) {
     shaderProgramSetVsh(&sProg3d, &sDvlb3d->DVLE[0]);
     sVbo3d = linearAlloc(sizeof(V3) * MAX_V3);
     if (!sVbo3d) return false;
-    if (!C3D_TexInitVRAM(&s3dTex, 256, 256, GPU_RGBA8)) return false;
+    if (!C3D_TexInitVRAM(&s3dTex, 512, 256, GPU_RGBA8)) return false;
     C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
     s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
     if (!s3dTarget) return false;
@@ -1062,7 +1121,16 @@ static C3D_Tex *texture_for(u32 teximage, u32 pltt) {
         e->key = key; e->pltt = pltt; e->w = w; e->h = h; e->hash = 0; e->hashFrame = 0;
     }
     e->used = sFrameNo;
-    if (e->hashFrame != sFrameNo) {  // (the data can change any frame: hashed once a frame)
+    if (e->hashFrame != sFrameNo) {
+        extern uint32_t port_trace3d;
+        if (port_trace3d && port_frame_count == port_trace3d) {
+            const u8 *src = tex_ptr(addr), *pal = pal_ptr(fmt == 2 ? pltt << 3 : pltt << 4);
+            u32 nz = 0, bytes = tex_bytes(fmt, w, h);
+            if (src) for (u32 i = 0; i < bytes; i++) nz += src[i] != 0;
+            port_log("  tex %08lX pltt %04lX: fmt %d %dx%d addr %05lX src %p (%lu/%lu nonzero) pal %p [%04X %04X]\n", (unsigned long)teximage, (unsigned long)pltt,
+                 fmt, w, h, (unsigned long)addr, (const void *)src, (unsigned long)nz, (unsigned long)bytes, (const void *)pal, pal ? rd16(pal) : 0, pal ? rd16(pal + 2) : 0);
+        }
+  // (the data can change any frame: hashed once a frame)
         e->hashFrame = sFrameNo;
         u32 hsh = 2166136261u;
         const u8 *src = tex_ptr(addr);
@@ -1083,6 +1151,7 @@ static GPU_TEXTURE_WRAP_PARAM wrap_of(int repeat, int flip) {
 }
 
 // ---------------------------------------------------------------- drawing a frame
+static float sClipX = 1.0f, sClipY = 1.0f;  // clip-space scale (widening)
 static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
     for (u32 i = 0; i < f->np; i++) {
         const G3Poly *p = &f->p[i];
@@ -1123,7 +1192,7 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
             const G3Vtx *v = &f->v[p->first + k];
             V3 *o = &sVbo3d[*nv + k];
             // DS clip z/w in -1..1 (near -1) to the PICA's -w..0, near at -w (depth = -z/w: nearer is larger)
-            *o = (V3){ v->x, -v->y, (v->z - v->w) * 0.5f, v->w, v->r / 255.0f, v->g / 255.0f, v->b / 255.0f, v->a / 255.0f,
+            *o = (V3){ v->x * sClipX, -v->y * sClipY, (v->z - v->w) * 0.5f, v->w, v->r / 255.0f, v->g / 255.0f, v->b / 255.0f, v->a / 255.0f,
                        v->s * sw, v->t * sh };
         }
         C3D_DrawArrays(GPU_TRIANGLES, *nv, (int)p->count);
@@ -1131,9 +1200,53 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
     }
 }
 
-static void render3d(void) {
+// Whether this frame's 3D is a scene to widen: the 3D layer on the top screen, over the whole DS
+// viewport, with opaque polygons covering all four corners of the DS frame (the overworld: the
+// map is the scene, 2D windows and text in front), as opposed to 3D sprites over 2D backgrounds
+// (battles, menus). A change has to hold for a few frames (no flicker through scene changes).
+static int covers(const G3Frame *f, float px, float py) {
+    for (u32 i = 0; i < f->np; i++) {
+        const G3Poly *p = &f->p[i];
+        if (p->translucent || ((p->polyattr >> 4) & 3) == 3) continue;
+        for (u32 k = 0; k + 2 < p->count; k += 3) {
+            const G3Vtx *a = &f->v[p->first + k], *b = a + 1, *c = a + 2;
+            if (a->w <= 0 || b->w <= 0 || c->w <= 0) continue;
+            float ax = a->x / a->w, ay = a->y / a->w, bx = b->x / b->w, by = b->y / b->w, cx = c->x / c->w, cy = c->y / c->w;
+            float d1 = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
+            float d2 = (cx - bx) * (py - by) - (cy - by) * (px - bx);
+            float d3 = (ax - cx) * (py - cy) - (ay - cy) * (px - cx);
+            if ((d1 >= 0 && d2 >= 0 && d3 >= 0) || (d1 <= 0 && d2 <= 0 && d3 <= 0)) return 1;
+        }
+    }
+    return 0;
+}
+
+static int want_wide(const G3Frame *f, int screenW) {
+    if (port_wide_mode == 0 || screenW != 400) return 0;
+    if (f->viewport[0] != 0 || f->viewport[2] != 255 || f->viewport[1] != 0 || f->viewport[3] != 191) return 0;
+    u32 dispcnt = rd32(DS(0x04000000));
+    if (!(dispcnt & 8) || !(dispcnt & 0x100)) return 0;
+    if (port_wide_mode == 2) return 1;
+    // (corners in clip space, y up, a few pixels in)
+    const float ix = 1 - 4 / 128.0f, iy = 1 - 4 / 96.0f;
+    return covers(f, -ix, iy) && covers(f, ix, iy) && covers(f, -ix, -iy) && covers(f, ix, -iy);
+}
+
+static int wide_stable(int want) {
+    static int state, count;
+    if (want == state) { count = 0; return state; }
+    if (++count >= 4) { state = want; count = 0; }
+    return state;
+}
+
+static void render3d(int screenW) {
     const G3Frame *f = port_g3_frame();
+    layout(screenW);
+    sWide = 0;
     if (!f || !s3dReady) return;
+    sWide = wide_stable(want_wide(f, screenW));
+    port_g3_wide = sWide ? sW / 256.0f : 1.0f;
+    port_g3_wide_y = sWide ? sH / 192.0f : 1.0f;
     sFrameNo++;
     u32 disp3d = *(volatile u16 *)DS(0x04000060);
     u32 clear = *(volatile u32 *)DS(0x04000350);
@@ -1146,8 +1259,12 @@ static void render3d(void) {
     // the DS viewport (x1, y1 from the bottom, x2, y2) on the 256x192 picture. (Measured with a test
     // square: the render target's viewport y counts from the picture's top, and its y axis points
     // down, so vertices go in with y negated.)
+    // In screen pixels (the image covers the whole screen: DS pixel x is at (x - sL) * sScale).
     int x1 = f->viewport[0], y1 = f->viewport[1], x2 = f->viewport[2], y2 = f->viewport[3];
-    C3D_SetViewport((u32)x1, (u32)(191 - y2), (u32)(x2 - x1 + 1), (u32)(y2 - y1 + 1));
+    float vx = (x1 - sL) * sScale, vy = (191 - y2 - sT) * sScale, vw = (x2 - x1 + 1) * sScale, vh = (y2 - y1 + 1) * sScale;
+    sClipX = sClipY = 1.0f;
+    if (sWide) { sClipX = vw / sScrW; sClipY = vh / 240; vx = vy = 0; vw = (float)sScrW; vh = 240; }
+    C3D_SetViewport((u32)(vx + 0.5f), (u32)(vy + 0.5f), (u32)(vw + 0.5f), (u32)(vh + 0.5f));
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     C3D_CullFace(GPU_CULL_NONE);
@@ -1163,7 +1280,7 @@ static void render3d(void) {
         C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
         C3D_AlphaTest(false, GPU_ALWAYS, 0);
         blend_off();
-        C3D_SetViewport(0, 0, 256, 192);
+        C3D_SetViewport((u32)(-sL * sScale), (u32)(-sT * sScale), (u32)(256 * sScale), (u32)(192 * sScale));
         static const float q[6][2] = { { -1, 0 }, { 0, 0 }, { -1, 1 }, { 0, 0 }, { 0, 1 }, { -1, 1 } };
         for (int k = 0; k < 6; k++) sVbo3d[nv + k] = (V3){ q[k][0], -q[k][1], -0.5f, 1, 1, 0, 0, 1, 0, 0 };
         C3D_DrawArrays(GPU_TRIANGLES, nv, 6);
