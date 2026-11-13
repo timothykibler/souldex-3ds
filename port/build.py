@@ -28,7 +28,7 @@ EXCLUDE_LIBS = {"libmi.a", "libcard.a", "libpxi.a", "libinit.a", "libstubscw.a",
                 "libutest.a", "libenv.a", "libmb.a", "libwm.a", "libwvr.a", "libwbt.a", "libwfs.a",
                 "libspi.a", "libctrdg.a", "libsyscall.a", "libnnsmcs.a", "libext.a", "libprc.a"}
 EXCLUDE_OBJS = {"src_os_tick.c.o", "src_fs_overlay.c.o", "src_os_timer.c.o", "src_os_valarm.c.o",
-                "src_gxasm.c.o", "src_internal.c.o", "src_external.c.o", "src_g2di_SplitChar.c.o", "src_player.c.o", "src_sndarc_stream.c.o"}
+                "src_gxasm.c.o", "src_internal.c.o", "src_external.c.o", "src_g2di_SplitChar.c.o", "src_sndarc_stream.c.o"}
 
 
 def run(cmd, **kw):
@@ -36,6 +36,62 @@ def run(cmd, **kw):
     if r.returncode:
         sys.exit(r.returncode)
     return r
+
+
+# The ARM7's sound driver (NitroSDK's libsnd_arm7: sequencer, voices, channel programming), run
+# by the port on another core (runtime/snd.c). Compiled for SDK_ARM7 with its I/O registers
+# pointed at an array (port/include_arm7), linked into one object whose symbols all get an a7_
+# prefix (the ARM9's sound library has the same names), and whose ARM7 OS needs (a message
+# queue, alarms, interrupt masking, PXI, power control) go to port_a7_* (snd.c).
+A7_EXTERN = {
+    "OS_InitMessageQueue": "port_a7_InitMessageQueue", "OS_SendMessage": "port_a7_SendMessage",
+    "OS_ReceiveMessage": "port_a7_ReceiveMessage", "OS_DisableInterrupts": "port_a7_DisableInterrupts",
+    "OS_RestoreInterrupts": "port_a7_RestoreInterrupts", "OS_CreateAlarm": "port_a7_CreateAlarm",
+    "OS_SetAlarm": "port_a7_SetAlarm", "OS_SetPeriodicAlarm": "port_a7_SetPeriodicAlarm",
+    "OS_CancelAlarm": "port_a7_CancelAlarm", "PXI_SendWordByFifo": "port_a7_PXI_SendWordByFifo",
+    "PXI_SetFifoRecvCallback": "port_a7_PXI_SetFifoRecvCallback", "PMi_SetControl": "port_a7_PMi_SetControl",
+    "PMi_ResetControl": "port_a7_PMi_ResetControl", "SDK_ASSERT": "port_a7_Assert",
+    "SDK_MINMAX_ASSERT": "port_a7_MinMaxAssert", "SVC_ResetSoundBias": "port_a7_ResetSoundBias",
+    "SVC_SetSoundBias": "port_a7_SetSoundBias",
+}
+
+
+def compile_arm7_sound(flags):
+    sdk = f"{ROOT}/pokeheartgold/subprojects/NitroSDK-4.2.30001/libraries/snd/src"
+    srcs = sorted(glob.glob(f"{sdk}/ARM7/*.c")) + [f"{sdk}/{f}" for f in
+            ("snd_command.c", "snd_work.c", "snd_util.c", "snd_bank.c", "snd_alarm.c", "snd_data.c")]
+    out = f"{B}/obj/a7"
+    os.makedirs(out, exist_ok=True)
+    # (the register override first: ahead of the SDK's own ARM7 memory map)
+    flags7 = [f"-I{ROOT}/port/include_arm7"] + [f for f in flags if f != "-DSDK_ARM9"] + [
+              "-USDK_ARM9", "-DSDK_ARM7", "-DSDK_NOINIT", "-fno-common"]
+    objs = []
+    for s in srcs:
+        o = f"{out}/{os.path.basename(s)}.o"
+        extra = ["-USDK_TS"] if s.endswith("snd_util.c") else []  # (the SDK's own pitch/volume tables, not the ARM7 BIOS's)
+        run([CC, "-c"] + cg.CFLAGS + ["-w"] + flags7 + extra + [s, "-o", o])
+        objs.append(o)
+    ld = CC.replace("gcc", "ld")
+    nm = CC.replace("gcc", "nm")
+    merged = f"{out}/../a7link/snd_arm7_r.o"
+    os.makedirs(f"{B}/obj/a7link", exist_ok=True)
+    run([ld, "-r", "-o", merged] + objs)
+    defined = subprocess.run([nm, "-g", "--defined-only", merged], capture_output=True, text=True).stdout.split()
+    undefined = subprocess.run([nm, "-u", merged], capture_output=True, text=True).stdout.split()
+    names = {defined[i + 2] for i in range(0, len(defined) - 2, 3)}
+    with open(f"{B}/gen/snd_arm7.syms", "w") as f:
+        for n in sorted(names):
+            f.write(f"{n} a7_{n}\n")
+        for n in undefined:
+            if n == "U":
+                continue
+            if n in A7_EXTERN:
+                f.write(f"{n} {A7_EXTERN[n]}\n")
+            elif n.startswith(("SND_", "SNDi_")):  # (ARM7 sound functions not built here: snd.c)
+                f.write(f"{n} a7_{n}\n")
+    final = f"{B}/obj/a7link/snd_arm7.o"  # (not in obj/ itself: the game objects are globbed from there)
+    run([CC.replace("gcc", "objcopy"), f"--redefine-syms={B}/gen/snd_arm7.syms", merged, final])
+    return final
 
 
 def compile_runtime():
@@ -61,6 +117,7 @@ def compile_runtime():
             cmd += [s, "-o", o]
         run(cmd)
         objs.append(o)
+    objs.append(compile_arm7_sound(flags))
     return objs
 
 
@@ -129,14 +186,16 @@ def main():
             break
         other = [l for l in r.stderr.splitlines() if "undefined reference" not in l and "error" in l.lower()]
         if other and not undefined:
-            print(r.stderr[-6000:])
+            open(f"{B}/link.log", "w").write(r.stdout + r.stderr)
+            print("\n".join(l for l in r.stderr.splitlines() if "warning:" not in l and "NOTE:" not in l)[-6000:])
             sys.exit(1)
         print(f"link: {len(undefined)} symbols missing -> stubs (build-3ds/gen/stubs_auto.c)")
         with open(f"{B}/missing_at_link.txt", "w") as f:
             f.write("\n".join(sorted(undefined)) + "\n")
         stubs = make_stubs(undefined)
-    if r.returncode:
-        print(r.stderr[-6000:])
+    if r.returncode:  # (the errors, not the flood of enum-size warnings; all of it in link.log)
+        open(f"{B}/link.log", "w").write(r.stdout + r.stderr)
+        print("\n".join(l for l in r.stderr.splitlines() if "warning:" not in l and "NOTE:" not in l)[-6000:])
         sys.exit(1)
     run(["python3", f"{ROOT}/port/cheatmap.py", elf])  # (the cheat engine's address table, into the ELF)
     run([DKA.replace("arm-none-eabi-", "") + "../../tools/bin/smdhtool", "--create", "SoulSilver 3DS",

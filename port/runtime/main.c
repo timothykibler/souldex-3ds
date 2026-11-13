@@ -85,6 +85,10 @@ int main(void) {
             unsigned n, m, per;
             char key[16];
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
+            else if (!strncmp(line, "wavdump", 7)) {  // ("wavdump [F]": 30 s of sound from frame F)
+                extern int port_snd_wavdump;
+                port_snd_wavdump = sscanf(line, "wavdump %u", &n) == 1 ? (int)n + 1 : 1;
+            }
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
@@ -101,6 +105,8 @@ int main(void) {
         }
         fclose(dbg);
     }
+    extern void port_snd_init(void);
+    port_snd_init();  // (the ARM7's sound driver: before the game sends it anything)
     extern void port_cheats_init(void);
     port_cheats_init();
     port_run_main_sinit();

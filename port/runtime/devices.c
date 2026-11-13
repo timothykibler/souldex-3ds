@@ -154,15 +154,15 @@ void TP_GetLatestRawPointInAuto(TPData *result) { *result = sTouch; }
 void TP_GetCalibratedPoint(TPData *disp, const TPData *raw) { *disp = *raw; }
 void TP_GetUnCalibratedPoint(u16 *raw_x, u16 *raw_y, u16 dx, u16 dy) { *raw_x = dx; *raw_y = dy; }
 
-// ---------------------------------------------------------------- PXI: the ARM7 link, with nobody on the other end
+// ---------------------------------------------------------------- PXI: the ARM7 link
+// The only ARM7 part the port has is the sound driver (snd.c): sound command lists go to it.
 void PXI_Init(void) {}
 void PXI_SetFifoRecvCallback(int fifotag, PXIFifoCallback callback) { (void)fifotag; (void)callback; }
 BOOL PXI_IsCallbackReady(int fifotag, PXIProc proc) { (void)fifotag; (void)proc; return TRUE; }
-// Sound command lists (SND_FlushCommand) are acknowledged at once, as the ARM7 sound driver would
-// once it had run them: until phase 3 runs that driver here, nothing plays, but nothing waits.
 int PXI_SendWordByFifo(int fifotag, u32 data, BOOL err) {
-    (void)data; (void)err;
-    if (fifotag == PXI_FIFO_TAG_SOUND && SNDi_SharedWork) SNDi_SharedWork->finishCommandTag++;
+    (void)err;
+    void port_snd_pxi_send(u32 data);
+    if (fifotag == PXI_FIFO_TAG_SOUND) port_snd_pxi_send(data);
     return 0;
 }
 

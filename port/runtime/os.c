@@ -90,6 +90,8 @@ void port_frame(void) {
         gG3Ticks = 0;
         port_log("  game code %lu us, waiting for the GPU / frame limit %lu us per frame\n", (unsigned long)(sGameTicks / 600 / 268), (unsigned long)(gGpu2dWaitTicks / 600 / 268));
         sGameTicks = gGpu2dWaitTicks = 0;
+        extern void port_snd_report(void);
+        port_snd_report();
     }
     port_input_update();
     extern void port_wm_frame(void);
