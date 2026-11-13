@@ -59,6 +59,8 @@ static float sScale = 1.25f;
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
 static int sWide;             // this frame's 3D layer is widened
+static int sMargins;          // the top screen's sides continue the DS picture's edge columns (not widened)
+static C3D_Tex sShade;        // (the sides' darkening: alpha rising outwards)
 static void scissor_ds(int whole);
 static void layout(int screenW);
 
@@ -608,6 +610,13 @@ static void bg_quads(void *arg) {
         if (sWide) scissor_ds(1);
         quad(sL, sT, sL + sW, sT + sH, 0, 0, sScrW / 512.0f, 240 / 256.0f);
         if (sWide) scissor_ds(0);
+        if (sMargins) {  // (its edge columns, in screen pixels)
+            float uL = ((0 - sL) * sScale + 0.5f) / 512, uR = ((256 - sL) * sScale - 0.5f) / 512;
+            scissor_ds(1);
+            quad(sL, 0, 0, 192, uL, (0 - sT) * sScale / 256, uL, (192 - sT) * sScale / 256);
+            quad(256, 0, sL + sW, 192, uR, (0 - sT) * sScale / 256, uR, (192 - sT) * sScale / 256);
+            scissor_ds(0);
+        }
         return;
     }
     Plane *p = d->p;
@@ -615,6 +624,13 @@ static void bg_quads(void *arg) {
     if (d->kind == 0) {
         float hofs = rd16(e->io + 0x10 + d->bg * 4) & 0x1FF, vofs = rd16(e->io + 0x12 + d->bg * 4) & 0x1FF;
         quad(0, 0, 256, 192, hofs / p->w, vofs / p->h, (hofs + 256) / p->w, (vofs + 192) / p->h);
+        if (sMargins) {  // (each row's outermost pixel, carried out to the screen's edges)
+            float uL = (hofs + 0.5f) / p->w, uR = (hofs + 255.5f) / p->w;
+            scissor_ds(1);
+            quad(sL, 0, 0, 192, uL, vofs / p->h, uL, (vofs + 192) / p->h);
+            quad(256, 0, sL + sW, 192, uR, vofs / p->h, uR, (vofs + 192) / p->h);
+            scissor_ds(0);
+        }
     } else {
         const u8 *r = e->io + 0x20 + (d->bg - 2) * 0x10;
         float pa = (int16_t)rd16(r) / 256.0f, pb = (int16_t)rd16(r + 2) / 256.0f;
@@ -629,6 +645,22 @@ static void bg_quads(void *arg) {
             uv[i][1] = ty / p->h;
         }
         quad4(xy, uv);
+        if (sMargins) {  // (the edge columns: the source point of x = 0 and x = 255, down the rows)
+            float e0[2][2], e1[2][2];
+            for (int k = 0; k < 2; k++) {
+                float sy = k ? 191.5f : -0.5f;
+                e0[k][0] = (X + pb * sy) / p->w; e0[k][1] = (Y + pd * sy) / p->h;
+                e1[k][0] = (X + pa * 255 + pb * sy) / p->w; e1[k][1] = (Y + pc * 255 + pd * sy) / p->h;
+            }
+            const float L[4][2] = { { sL, 0 }, { 0, 0 }, { sL, 192 }, { 0, 192 } };
+            const float R[4][2] = { { 256, 0 }, { sL + sW, 0 }, { 256, 192 }, { sL + sW, 192 } };
+            const float uvL[4][2] = { { e0[0][0], e0[0][1] }, { e0[0][0], e0[0][1] }, { e0[1][0], e0[1][1] }, { e0[1][0], e0[1][1] } };
+            const float uvR[4][2] = { { e1[0][0], e1[0][1] }, { e1[0][0], e1[0][1] }, { e1[1][0], e1[1][1] }, { e1[1][0], e1[1][1] } };
+            scissor_ds(1);
+            quad4(L, uvL);
+            quad4(R, uvR);
+            scissor_ds(0);
+        }
     }
 }
 
@@ -643,6 +675,18 @@ static void spr_quads(void *arg) {
         // edge mustn't sample the next cell)
         const float in = 1.0f / 64;
         quad(s->x, s->y, s->x + s->w, s->y + s->h, (s->sx + in) / SW, (s->sy + in) / SH, (s->sx + s->w - in) / SW, (s->sy + s->h - in) / SH);
+        if (sMargins && (s->x <= 0 || s->x + s->w >= 256)) {  // (a sprite at an edge: its edge column carried out)
+            scissor_ds(1);
+            if (s->x <= 0) {
+                float u = (s->sx + (0 - s->x) + 0.5f) / SW;
+                quad(sL, s->y, 0, s->y + s->h, u, (s->sy + in) / SH, u, (s->sy + s->h - in) / SH);
+            }
+            if (s->x + s->w >= 256) {
+                float u = (s->sx + (255 - s->x) + 0.5f) / SW;
+                quad(256, s->y, sL + sW, s->y + s->h, u, (s->sy + in) / SH, u, (s->sy + s->h - in) / SH);
+            }
+            scissor_ds(0);
+        }
         return;
     }
     C3D_TexBind(0, s->tex);
@@ -765,6 +809,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
     sOX = sOY = 0;
     int wide3d = e->main && sWide;
+    sMargins = screenW == 400 && !wide3d && sScale > 1.0f;  // (the top screen's sides, when the 3D doesn't fill them)
     scissor_ds(0);
     C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);  // (on: the depth-stencil buffer is only written with it)
     C3D_CullFace(GPU_CULL_NONE);
@@ -798,7 +843,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     // the backdrop, and in the stencil whether it is a second blend target
     C3D_StencilTest(true, GPU_ALWAYS, (mx.second & 0x20) ? 4 : 0, 0, 0xFF);
     C3D_StencilOp(GPU_STENCIL_KEEP, GPU_STENCIL_KEEP, GPU_STENCIL_REPLACE);
-    if (wide3d) { scissor_ds(1); flat(bgr8_abgr(backdrop), (int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
+    if (wide3d || sMargins) { scissor_ds(1); flat(bgr8_abgr(backdrop), (int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
     else flat(bgr8_abgr(backdrop), 0, 0, 256, 192);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     if (dmode >= 2) { engine_from_software(ei); return; }
@@ -855,11 +900,25 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
         u8 a = (u8)(f * 255 / 16);
         set_tev(TEV_FLAT, (int)((u32)a << 24 | (m == 1 ? 0xFFFFFF : 0)));
         C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
-        if (wide3d) { scissor_ds(1); fill((int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
+        if (wide3d || sMargins) { scissor_ds(1); fill((int)sL - 1, (int)sT - 1, (int)(sL + sW) + 1, (int)(sT + sH) + 1); scissor_ds(0); }
         else fill(0, 0, 256, 192);
         blend_off();
     }
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
+    if (sMargins && sShade.data) {  // the sides darken outwards (they're a continuation, not the picture)
+        C3D_AlphaTest(false, GPU_ALWAYS, 0);
+        C3D_TexEnv *env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, 0, 0);
+        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+        C3D_TexBind(0, &sShade);
+        scissor_ds(1);
+        quad(sL, sT, 0, sT + sH, 1, 0, 0, 1);         // (u: 0 at the picture, 1 at the screen's edge)
+        quad(256, sT, sL + sW, sT + sH, 0, 0, 1, 1);
+        scissor_ds(0);
+        blend_off();
+    }
 }
 
 // ---------------------------------------------------------------- frames
@@ -901,6 +960,13 @@ bool port_gpu2d_init(void) {
     C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
     C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
     if (!init3d()) port_log("gpu: no 3D layer\n");
+    if (C3D_TexInit(&sShade, 64, 8, GPU_RGBA4)) {  // (black, alpha 0 -> about 60 % across)
+        C3D_TexSetFilter(&sShade, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&sShade, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        for (int y = 0; y < 8; y++)
+            for (int x = 0; x < 64; x++) *tex_px(sShade.data, 64, 8, x, y) = (u16)((x * x * 10 + 63 * 63 / 2) / (63 * 63));
+        C3D_TexFlush(&sShade);
+    }
     port_log("gpu: VRAM free %lu\n", (unsigned long)vramSpaceFree());
     port_log("gpu: ready\n");
     sReady = true;

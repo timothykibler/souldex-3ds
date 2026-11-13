@@ -39,7 +39,9 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    layer once per eye with a depth-dependent horizontal shift (x_clip += eye * sep * (w - conv),
    from the slider: osGet3DSliderState), 2D layers at the screen plane; gfxSet3D and a right-eye
    target. Mostly the overworld and battles.
-8. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`
+8. **Wipes in widened scenes**: 2D effects reaching the DS picture's edge (the encounter
+   transition's stripes) aren't carried over the widened world's sides, as fulldex does.
+9. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`
    packing, H-blank DMA effects, mosaic, bitmap sprites, microphone, RTC uses UTC, VRAM bank
    remapping isn't modelled (each window is its own memory; a first attempt broke battles).
 
