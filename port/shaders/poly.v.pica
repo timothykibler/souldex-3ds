@@ -1,0 +1,16 @@
+; The 3D renderer's vertex shader: positions arrive in clip space (the geometry engine did the
+; DS's transforms), colours and texture coordinates pass through.
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+
+.alias inpos v0
+.alias inclr v1
+.alias intc  v2
+
+.proc main
+	mov outpos, inpos
+	mov outclr, inclr
+	mov outtc0, intc
+	end
+.end

@@ -1,0 +1,19 @@
+# Fetched sources (see README) and everything built from them
+/pokeheartgold
+/NitroSDK
+/NitroSystem
+/build-gen
+/build-3ds
+/*.log
+# Never commit a game ROM, a save, or anything built from them
+*.nds
+*.sav
+*.cia
+*.3dsx
+*.elf
+/*.nosync/
+# Screenshots of the game (made from the ROM)
+/captures/
+# (iCloud conflict copies)
+/build-3ds */
+__pycache__/

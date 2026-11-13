@@ -1,0 +1,101 @@
+// The 3DS program: sets up the DS address space and the player's ROM, then runs the game's own
+// NitroMain (pokeheartgold's src/main.c), which never returns.
+#include <3ds.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include "port_ds.h"
+#include "port.h"
+
+#define PORT_DIR "sdmc:/3ds/soulsilver-3ds"
+
+static FILE *gLog;
+uint32_t port_test3d, port_trace3d;
+
+void port_log(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+    if (gLog) {
+        va_start(ap, fmt);
+        vfprintf(gLog, fmt, ap);
+        va_end(ap);
+        fflush(gLog);
+    }
+}
+
+void port_fatal(const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    consoleInit(GFX_BOTTOM, NULL);  // (the log on the bottom screen from here on)
+    port_log("\nFATAL: %s\n", buf);
+    port_log("Press START to exit.\n");
+    while (aptMainLoop()) {
+        hidScanInput();
+        if (hidKeysDown() & KEY_START) break;
+        gspWaitForVBlank();
+    }
+    gfxExit();
+    exit(1);
+}
+
+// The ARM9 binary's startup work the port does instead of crt0: the ROM header copy and the
+// boot information the SDK reads from the system area at the top of main memory.
+static void setup_system_area(void) {
+    // HW_ROM_HEADER_BUF (0x027FFE00) and HW_CARD_ROM_HEADER (0x027FFA80): the cartridge header
+    u8 header[0x160];
+    port_rom_read(0, header, sizeof(header));
+    memcpy((void *)(0x027FFE00 + PORT_DS_DELTA), header, sizeof(header));
+    memcpy((void *)(0x027FFA80 + PORT_DS_DELTA), header, sizeof(header));
+    // No buttons held yet (they're active low: an all-zero register is every button down, which
+    // includes the START+SELECT+L+R soft reset).
+    *(volatile u16 *)(0x04000130 + PORT_DS_DELTA) = 0x03FF;
+    *(volatile u16 *)(0x027FFFA8 + PORT_DS_DELTA) = 0x0043;
+}
+
+extern void NitroMain(void);
+extern void port_run_main_sinit(void);
+
+int main(void) {
+    gfxInitDefault();
+    osSetSpeedupEnable(true);  // (New 3DS: 804 MHz and the L2 cache)
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(PORT_DIR, 0777);
+    gLog = fopen(PORT_DIR "/log.txt", "w");
+    port_log("SoulSilver 3DS (phase 1)\n");
+    extern bool port_gpu2d_init(void);
+    if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
+
+    if (!port_ds_mem_init()) port_fatal("could not set up the DS memory window");
+    if (!port_rom_open()) port_fatal("no SoulSilver ROM: put it at " PORT_DIR "/soulsilver.nds");
+    setup_system_area();
+    port_overlays_init();
+    // debug.txt on the SD card: "dump N" saves both screens every N frames (shot_*.bmp)
+    FILE *dbg = fopen(PORT_DIR "/debug.txt", "r");
+    if (dbg) {
+        extern uint32_t port_dump_every;
+        char line[64];
+        while (fgets(line, sizeof(line), dbg)) {
+            unsigned n;
+            char key[16];
+            if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
+            else if (!strncmp(line, "test3d", 6)) { extern uint32_t port_test3d, port_trace3d; port_test3d = 1; }
+            else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
+            else if (sscanf(line, "press %u %15s", &n, key) == 2) {
+                void port_input_script(uint32_t frame, const char *name);
+                port_input_script(n, key);
+            }
+        }
+        fclose(dbg);
+    }
+    port_run_main_sinit();
+    port_log("starting the game\n");
+    NitroMain();
+    port_fatal("NitroMain returned");
+}
