@@ -43,6 +43,11 @@ switches to *fill*: the picture fills each screen's height at 1.25x, which no ex
 (pixels stay even, edges slightly soft), and *Sides* chooses black sides or the picture's edges
 continued. The choice is kept in `settings.txt`.
 
+**Stereoscopic 3D** follows the 3D slider in 1:1 mode: the 2D layers sit at the screen, the 3D
+world goes into it (battles stay flat: their Pokémon stand on 2D platforms). It costs some CPU
+time per frame; the menu's *3D* row turns it off entirely (also `3d off` in `settings.txt`, or
+build with `-DPORT_NO_STEREO` to start with it off).
+
 ## Cheats
 
 Put a `usrcheat.dat` (the R4 / TWiLight Menu++ format, e.g. DeadSkullzJr's database) at

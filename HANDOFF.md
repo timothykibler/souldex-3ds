@@ -40,7 +40,8 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    clamped to the frame's on-screen range (nearest at the screen, farthest 3.5 px per eye behind
    at full slider); orthographic scenes (battles: 2D platforms) stay flat. The right eye needs
    ~2.3 MB of VRAM, so not in the 1.25x fill mode. Cost: the 3D layer's command building twice
-   (+2.5 ms a frame in the field, Azahar's timing); only with the slider up. `debug.txt`
+   (+2.5 ms a frame in the field, Azahar's timing); only with the slider up, and the menu's *3D* row
+   (`settings.txt` `3d off`, or `-DPORT_NO_STEREO`) turns it off entirely. `debug.txt`
    `stereo X` sets the slider; dumps add `full_N_r` (the right eye).
 8. **Wipes in widened scenes**: 2D effects reaching the DS picture's edge (the encounter
    transition's stripes) aren't carried over the widened world's sides, as fulldex does.

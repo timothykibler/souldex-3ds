@@ -1662,6 +1662,13 @@ static int wide_stable(int want) {
 // and screen (citro3d clears every buffer at the frame's start, so nothing is shared): about
 // 2.3 MB of VRAM, there in 1:1 mode only (the fill mode's 2x targets take it).
 float port_stereo_force = -1;   // debug.txt "stereo X": the slider at X (0..1), for testing
+// The switch for it all (the menu's "3D" row, settings.txt "3d on|off"; a build with
+// -DPORT_NO_STEREO starts with it off): off, the slider does nothing and nothing is allocated.
+#ifdef PORT_NO_STEREO
+int port_stereo_enabled = 0;
+#else
+int port_stereo_enabled = 1;
+#endif
 static int sStereoFail;         // (no VRAM: not tried again until the display mode changes)
 static float sShiftPx;          // the farthest depth's shift per eye, in screen pixels
 static float sConv, sFar;
@@ -1706,6 +1713,10 @@ static bool stereo_alloc(void) {
 // (held for a few frames before changing: the parallax barrier doesn't flicker through scene changes).
 static void stereo_decide(int scene3d) {
     float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
+    if (!port_stereo_enabled) {  // (switched off: its VRAM back; C3D_FrameBegin has waited for the GPU)
+        if (sTopR || sStereo) stereo_free();
+        return;
+    }
     int want = slider > 0.02f && sSS == 1 && scene3d;
     static int count;
     if (want == sStereo) count = 0;
