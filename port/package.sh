@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Makes build-3ds/soulsilver.cia from build-3ds/soulsilver.elf (after port/build.py).
-# Uses the fulldex-3ds-builder image (devkitARM + makerom + bannertool).
+# Uses the ss3ds-cia image (devkitARM + makerom + bannertool: docker/cia/Dockerfile), built here if missing.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-docker run --rm -v "$PWD":/w -w /w/build-3ds fulldex-3ds-builder sh -c '
+docker image inspect ss3ds-cia >/dev/null 2>&1 || docker build -q -t ss3ds-cia docker/cia >/dev/null
+docker run --rm -v "$PWD":/w -w /w/build-3ds ss3ds-cia sh -c '
   set -e
   bannertool makesmdh -s "SoulSilver 3DS" -l "SoulSilver 3DS port, phase 0" -p "personal build" -i /w/port/icon.png -o soulsilver.smdh >/dev/null
   bannertool makebanner -i /w/port/icon-banner.png -a /w/port/silence.wav -o soulsilver.bnr >/dev/null

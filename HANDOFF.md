@@ -64,8 +64,8 @@ the build; this file is the state of play and how to pick it up.
   `docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--skip-game]`
   (`--skip-game` relinks the runtime only; a full build recompiles the game and SDK, ~5 min).
   Then `find -L build-3ds -name "* [0-9].*" -delete` (iCloud conflict copies, see below).
-- **CIA**: `port/package.sh` (needs the `fulldex-3ds-builder` image from the pokemon-fulldex repo's
-  `gba/3ds/Dockerfile`: makerom + bannertool).
+- **CIA**: `port/package.sh` (builds the `ss3ds-cia` image from `docker/cia/Dockerfile` the first
+  time: devkitARM + makerom + bannertool, the latter compiled from source).
 - **Test in Azahar** (downloaded to the old session's scratch folder; re-download
   `azahar-macos-arm64-2126.2.zip` from github.com/azahar-emu/azahar/releases if gone):
   - Launch through the bundle (`open -n -a Azahar.app --args -w game.elf`): run directly, Azahar

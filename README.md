@@ -27,7 +27,7 @@ Needs Docker. One-time setup:
 Then:
 
     docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py
-    port/package.sh        # build-3ds/soulsilver.cia (needs the fulldex-3ds-builder image: makerom, bannertool)
+    port/package.sh        # build-3ds/soulsilver.cia (builds the ss3ds-cia image from docker/cia the first time: makerom, bannertool)
 
 ## Run
 
