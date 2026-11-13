@@ -3,7 +3,8 @@
 # Uses the ss3ds-cia image (devkitARM + makerom + bannertool + Pillow: docker/cia/Dockerfile), built here if missing.
 # HOME Menu art (icon, banner, titles) comes from your ROM (tools/cia_art.py): SS3DS_ROM=path/to/rom.nds,
 # or the copy Azahar uses; without one, the plain placeholders in port/. Your own artwork for the banner
-# and icon (kept out of git): SS3DS_KEYART=image, or build-3ds/keyart.(webp|png|jpg).
+# and icon (kept out of git): SS3DS_KEYART=image, or build-3ds/keyart.(webp|png|jpg): a layered,
+# transparent, stereoscopic banner (tools/cgfx_banner.py).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker image inspect ss3ds-cia >/dev/null 2>&1 || docker build -q -t ss3ds-cia docker/cia >/dev/null
@@ -25,6 +26,10 @@ docker run --rm -v "$PWD":/w "${ROMARG[@]}" -w /w/build-3ds ss3ds-cia sh -c '
   fi
   bannertool makesmdh -s "$SHORT" -l "$LONG" -p "$PUB" -i "$ICON" -o soulsilver.smdh >/dev/null
   bannertool makebanner -i "$BANNER" -a /w/port/silence.wav -o soulsilver.bnr >/dev/null
+  if [ -f art/banner_front.png ] && [ -f art/banner_back.png ]; then  # (layered: stereoscopic, full colour)
+    python3 /w/tools/cgfx_banner.py soulsilver.bnr art/banner_front.png art/banner_back.png art/banner.cgfx
+    bannertool makebanner -ci art/banner.cgfx -a /w/port/silence.wav -o soulsilver.bnr >/dev/null
+  fi
   arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf 2>/dev/null || /opt/devkitpro/devkitARM/bin/arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf
   makerom -f cia -o soulsilver.cia -rsf /w/port/cia.rsf -target t -exefslogo -elf soulsilver-stripped.elf -icon soulsilver.smdh -banner soulsilver.bnr
 '
