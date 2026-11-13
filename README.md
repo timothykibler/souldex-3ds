@@ -1,12 +1,12 @@
-# SoulSilver 3DS (phase 0)
+# SoulSilver 3DS
 
 A native Nintendo 3DS build of Pokémon SoulSilver from the [pret/pokeheartgold](https://github.com/pret/pokeheartgold)
 decompilation: the game's code (its C, and the ~64% still in ARM/Thumb assembly, which the 3DS's
 ARM11 runs as it is) compiled with devkitARM GCC, on a runtime that stands in for the DS hardware
 and the parts of Nintendo's SDK that drove it. The game's files are read from your own ROM.
 
-**Phase 0** is the go/no-go: the game builds, links and boots as a 3DS program. It draws nothing yet
-(the renderer is phase 1) and makes no sound.
+It boots, loads saves, and plays the overworld and battles with the DS picture shown 1:1 (the
+overworld's 3D widened to fill the 400x240 top screen). No sound yet. See HANDOFF.md.
 
 Nothing of the game is in this repository. Builds contain code compiled from the decomp: keep them
 to yourself.
