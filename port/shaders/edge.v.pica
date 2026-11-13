@@ -1,0 +1,16 @@
+; Edge marking's full-screen passes: a position already in clip space and two texture
+; coordinates (a pixel of the polygon-ID image and one of its neighbours).
+.out outpos position
+.out outtc0 texcoord0
+.out outtc1 texcoord1
+
+.alias inpos v0
+.alias intc0 v1
+.alias intc1 v2
+
+.proc main
+	mov outpos, inpos
+	mov outtc0, intc0
+	mov outtc1, intc1
+	end
+.end

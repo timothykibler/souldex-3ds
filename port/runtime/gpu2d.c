@@ -45,7 +45,8 @@ static float sOX, sOY;  // (offset added to every quad: 0, the projection places
 // top screen the 3D layer can be widened to fill all of it (400x240): the DS frustum is extended
 // on both axes (clip x scaled by 256/400, y by 192/240), so what's inside the DS frame lands
 // exactly where it would, at the same scale as the 2D, and the border shows more of the scene.
-int port_wide_mode = 1;    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
+int port_wide_mode = 1;
+int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
 float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
 static const float sScale = 1.0f;
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
@@ -546,6 +547,8 @@ static void draw_layer(const Mix *mx, int layerBit, int semi, void (*draw)(void 
 
 typedef struct { const Eng *e; int bg; Plane *p; int kind; } BgDraw;
 static C3D_Tex s3dTex;
+static C3D_Tex sIdTex;                 // edge marking's polygon-ID image (see the 3D layer)
+static C3D_RenderTarget *sIdTarget;
 static int s3dHave;
 static void render3d(int screenW);
 static bool init3d(void);
@@ -554,7 +557,7 @@ static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
     if (d->kind == 3) {  // the 3D layer: rendered at the screen's own resolution, the whole screen
-        C3D_TexBind(0, &s3dTex);
+        C3D_TexBind(0, port_edge_mode >= 2 && sIdTarget ? &sIdTex : &s3dTex);
         if (sWide) scissor_ds(1);
         quad(sL, sT, sL + sW, sT + sH, 0, 0, sScrW / 512.0f, 240 / 256.0f);
         if (sWide) scissor_ds(0);
@@ -903,6 +906,8 @@ void port_gpu2d_readback(u16 *top, u16 *bottom) {
 void port_gpu2d_dump_full(u32 frame) {
     {
         const G3Frame *g = port_g3_frame();
+        port_log("edge colours %04X %04X %04X %04X %04X %04X %04X %04X\n", rd16(DS(0x04000330)), rd16(DS(0x04000332)), rd16(DS(0x04000334)), rd16(DS(0x04000336)),
+                 rd16(DS(0x04000338)), rd16(DS(0x0400033A)), rd16(DS(0x0400033C)), rd16(DS(0x0400033E)));
         port_log("frame %lu: wide %d BGCNT %04X %04X %04X %04X DISPCNT %08lX DISP3DCNT %04X CLEAR %08lX vp %d,%d,%d,%d\n", (unsigned long)frame, sWide, rd16(DS(0x04000008)), rd16(DS(0x0400000A)), rd16(DS(0x0400000C)), rd16(DS(0x0400000E)), rd32(DS(0x04000000)),
                  *(volatile u16 *)DS(0x04000060), *(volatile u32 *)DS(0x04000350), g ? g->viewport[0] : -1, g ? g->viewport[1] : -1, g ? g->viewport[2] : -1, g ? g->viewport[3] : -1);
     }
@@ -949,9 +954,15 @@ void port_gpu2d_describe(int engine) {
 
 extern const u8 poly_shbin[];
 extern const u32 poly_shbin_size;
-static DVLB_s *sDvlb3d;
-static shaderProgram_s sProg3d;
+extern const u8 edge_shbin[];
+extern const u32 edge_shbin_size;
+static DVLB_s *sDvlb3d, *sDvlbEdge;
+static shaderProgram_s sProg3d, sProgEdge;
 static C3D_RenderTarget *s3dTarget;
+// Edge marking: each opaque pixel's polygon ID (R, as ID * 4) and depth (G, larger = nearer),
+// drawn into its own image against the 3D layer's depth buffer.
+typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
+static VE *sVboEdge;
 static int s3dReady;
 
 typedef struct { float x, y, z, w, r, g, b, a, s, t; } V3;
@@ -989,6 +1000,17 @@ static bool init3d(void) {
     C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
     s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
     if (!s3dTarget) return false;
+    sDvlbEdge = DVLB_ParseFile((u32 *)edge_shbin, edge_shbin_size);
+    shaderProgramInit(&sProgEdge);
+    shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
+    sVboEdge = linearAlloc(sizeof(VE) * 6 * 8);
+    if (sVboEdge && C3D_TexInitVRAM(&sIdTex, 512, 256, GPU_RGBA8)) {
+        C3D_TexSetFilter(&sIdTex, GPU_NEAREST, GPU_NEAREST);
+        C3D_TexSetWrap(&sIdTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        // (its own depth buffer: an "equal" test against the 3D pass's fails on alternate
+        // columns, the PICA doesn't reproduce depths bit for bit between passes)
+        sIdTarget = C3D_RenderTargetCreateFromTex(&sIdTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+    }
     s3dReady = 1;
     return true;
 }
@@ -1200,6 +1222,130 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
     }
 }
 
+// ---------------------------------------------------------------- edge marking
+// The DS outlines a pixel with the edge colour of its polygon ID's group when one of its four
+// neighbours has a different polygon ID and is farther away (the clear plane counts, with the
+// clear polygon ID). First the IDs: the opaque polygons again (nearest wins, its own depth
+// buffer), with the texture's alpha test.
+static void draw_ids(const G3Frame *f, u32 disp3d, int *nv, int translucent) {
+    // (depth goes in 8 bits: spread over this frame's own range of opaque depths)
+    float zmin = 1, zmax = -1;
+    for (u32 i = 0; i < f->np; i++) {
+        const G3Poly *p = &f->p[i];
+        if (p->translucent) continue;
+        for (u32 k = 0; k < p->count; k++) {
+            const G3Vtx *v = &f->v[p->first + k];
+            if (v->w <= 0) continue;
+            float z = v->z / v->w;
+            if (z < zmin) zmin = z;
+            if (z > zmax) zmax = z;
+        }
+    }
+    if (zmin < -1) zmin = -1;
+    if (zmax > 1) zmax = 1;
+    float zscale = zmax > zmin ? 0.996f / (zmax - zmin) : 0;
+    for (u32 i = 0; i < f->np; i++) {
+        const G3Poly *p = &f->p[i];
+        if (p->translucent != translucent) continue;
+        int fmt = (p->teximage >> 26) & 7;
+        C3D_Tex *tex = (fmt && (disp3d & 1)) ? texture_for(p->teximage, p->pltt) : NULL;
+        C3D_TexEnv *env = C3D_GetTexEnv(0);
+        C3D_TexEnvInit(env);
+        C3D_TexEnvSrc(env, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
+        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+        if (tex) {
+            C3D_TexSetWrap(tex, wrap_of((p->teximage >> 16) & 1, (p->teximage >> 18) & 1), wrap_of((p->teximage >> 17) & 1, (p->teximage >> 19) & 1));
+            C3D_TexBind(0, tex);
+            C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, 0, 0);
+        } else {
+            C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+        }
+        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+        int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
+        C3D_AlphaTest(true, GPU_GREATER, aref);
+        if (*nv + (int)p->count > MAX_V3) return;
+        float id = (float)(((p->polyattr >> 24) & 63) * 4) / 255.0f;  // (translucent: only G = 0 is written)
+        float sw = tex ? 1.0f / tex->width : 0, sh = tex ? 1.0f / tex->height : 0;
+        for (u32 k = 0; k < p->count; k++) {
+            const G3Vtx *v = &f->v[p->first + k];
+            V3 *o = &sVbo3d[*nv + k];
+            float d = v->w > 0 && !translucent ? 0.004f + (zmax - v->z / v->w) * zscale : 0;  // (nearer: larger; 0: never an edge)
+            if (d < 0) d = 0;
+            if (d > 1) d = 1;
+            *o = (V3){ v->x * sClipX, -v->y * sClipY, (v->z - v->w) * 0.5f, v->w, id, d, 0, 1, v->s * sw, v->t * sh };
+        }
+        C3D_DrawArrays(GPU_TRIANGLES, *nv, (int)p->count);
+        *nv += (int)p->count;
+    }
+}
+
+// Then the outlines, over the 3D image: per neighbour and per sign of the ID difference, a pass
+// whose combiners turn (ID difference > 0) and (this pixel nearer) into an alpha of 0 or 1.
+static void draw_edges(void) {
+    C3D_BindProgram(&sProgEdge);
+    C3D_AttrInfo *ai = C3D_GetAttrInfo();
+    AttrInfo_Init(ai);
+    AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+    C3D_BufInfo *bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    BufInfo_Add(bi, sVboEdge, sizeof(VE), 3, 0x210);
+    C3D_SetViewport(0, 0, (u32)sScrW, 240);
+    C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_AlphaTest(true, GPU_GREATER, 0);
+    blend_off();
+    C3D_TexBind(0, &sIdTex);
+    C3D_TexBind(1, &sIdTex);
+    // (the edge colour: the table entry of the group most polygons on screen use is close enough
+    // for one colour; HGSS sets them all alike)
+    u16 ec = rd16(DS(0x04000330));
+    u32 r = ec & 31, g = (ec >> 5) & 31, b = (ec >> 10) & 31;
+    u32 abgr = 0xFF000000u | (b << 3 | b >> 2) << 16 | (g << 3 | g >> 2) << 8 | (r << 3 | r >> 2);
+    const float U = sScrW / 512.0f, V = 240 / 256.0f;
+    static const int nb[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    int n = 0;
+    for (int d = 0; d < 4; d++) {
+        float du = nb[d][0] / 512.0f, dv = nb[d][1] / 256.0f;
+        // corners: top-left, top-right, bottom-left, bottom-right (clip y up, negated going in)
+        VE c[4] = { { -1, -1, -0.5f, 1, 0, 0, du, dv }, { 1, -1, -0.5f, 1, U, 0, U + du, dv },
+                    { -1, 1, -0.5f, 1, 0, V, du, V + dv }, { 1, 1, -0.5f, 1, U, V, U + du, V + dv } };
+        static const int idx[6] = { 0, 1, 2, 1, 3, 2 };
+        for (int sign = 0; sign < 2; sign++) {
+            VE *q = sVboEdge + n;
+            for (int k = 0; k < 6; k++) q[k] = c[idx[k]];
+            for (int s = 0; s < 6; s++) C3D_TexEnvInit(C3D_GetTexEnv(s));
+            C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+            // RGB: ID difference in R (this one's minus the neighbour's, or the other way)
+            if (sign == 0) C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE0, GPU_TEXTURE1, 0);
+            else C3D_TexEnvSrc(e0, C3D_RGB, GPU_TEXTURE1, GPU_TEXTURE0, 0);
+            C3D_TexEnvFunc(e0, C3D_RGB, GPU_SUBTRACT);
+            // alpha: how much nearer this pixel is (G: larger is nearer)
+            C3D_TexEnvSrc(e0, C3D_Alpha, GPU_TEXTURE0, GPU_TEXTURE1, 0);
+            C3D_TexEnvOpAlpha(e0, GPU_TEVOP_A_SRC_G, GPU_TEVOP_A_SRC_G, GPU_TEVOP_A_SRC_ALPHA);
+            C3D_TexEnvFunc(e0, C3D_Alpha, GPU_SUBTRACT);
+            C3D_TexEnvScale(e0, C3D_Both, GPU_TEVSCALE_4);
+            for (int s = 1; s <= 3; s++) {  // (any difference saturates to 1)
+                C3D_TexEnv *e = C3D_GetTexEnv(s);
+                C3D_TexEnvSrc(e, C3D_Both, GPU_PREVIOUS, 0, 0);
+                C3D_TexEnvFunc(e, C3D_Both, GPU_REPLACE);
+                C3D_TexEnvScale(e, C3D_Both, GPU_TEVSCALE_4);
+            }
+            C3D_TexEnv *e4 = C3D_GetTexEnv(4);
+            C3D_TexEnvSrc(e4, C3D_RGB, GPU_CONSTANT, 0, 0);
+            C3D_TexEnvFunc(e4, C3D_RGB, GPU_REPLACE);
+            C3D_TexEnvSrc(e4, C3D_Alpha, GPU_PREVIOUS, GPU_PREVIOUS, 0);
+            C3D_TexEnvOpAlpha(e4, GPU_TEVOP_A_SRC_R, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);
+            C3D_TexEnvFunc(e4, C3D_Alpha, GPU_MODULATE);
+            C3D_TexEnvColor(e4, abgr);
+            C3D_DrawArrays(GPU_TRIANGLES, n, 6);
+            n += 6;
+        }
+    }
+    for (int s = 1; s < 6; s++) C3D_TexEnvInit(C3D_GetTexEnv(s));
+    C3D_TexBind(1, NULL);
+}
+
 // Whether this frame's 3D is a scene to widen: the 3D layer on the top screen, over the whole DS
 // viewport, with opaque polygons covering all four corners of the DS frame (the overworld: the
 // map is the scene, 2D windows and text in front), as opposed to 3D sprites over 2D backgrounds
@@ -1264,12 +1410,32 @@ static void render3d(int screenW) {
     float vx = (x1 - sL) * sScale, vy = (191 - y2 - sT) * sScale, vw = (x2 - x1 + 1) * sScale, vh = (y2 - y1 + 1) * sScale;
     sClipX = sClipY = 1.0f;
     if (sWide) { sClipX = vw / sScrW; sClipY = vh / 240; vx = vy = 0; vw = (float)sScrW; vh = 240; }
-    C3D_SetViewport((u32)(vx + 0.5f), (u32)(vy + 0.5f), (u32)(vw + 0.5f), (u32)(vh + 0.5f));
+    // (C3D_FrameDrawOn resets the viewport to the whole target: set again after each switch)
+    const u32 vpx = (u32)(vx + 0.5f), vpy = (u32)(vy + 0.5f), vpw = (u32)(vw + 0.5f), vph = (u32)(vh + 0.5f);
+    C3D_SetViewport(vpx, vpy, vpw, vph);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     C3D_CullFace(GPU_CULL_NONE);
     int nv = 0;
     draw_polys(f, 0, disp3d, &nv);
+    if ((disp3d & 0x20) && sIdTarget && port_edge_mode) {
+        // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
+        // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
+        int ida = (clear >> 24) & 63;
+        C3D_RenderTargetClear(sIdTarget, C3D_CLEAR_ALL, (u32)(ida * 4) << 24 | 0xFF, 0);
+        C3D_FrameDrawOn(sIdTarget);
+        C3D_SetViewport(vpx, vpy, vpw, vph);
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+        draw_ids(f, disp3d, &nv, 0);
+        // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
+        draw_ids(f, disp3d, &nv, 1);
+        C3D_FrameDrawOn(s3dTarget);
+        draw_edges();
+        C3D_BindProgram(&sProg3d);
+        attrs_3d();
+        C3D_SetViewport(vpx, vpy, vpw, vph);
+    }
     draw_polys(f, 1, disp3d, &nv);
     extern u32 port_test3d;
     if (port_test3d) {  // (orientation check: a red square in the DS picture's top-left quarter)

@@ -44,11 +44,11 @@ def compile_runtime():
     out = f"{B}/obj/port"
     os.makedirs(out, exist_ok=True)
     # the GPU compositor's vertex shader, assembled and embedded
-    for sh in ("quad", "poly"):
+    for sh in ("quad", "poly", "edge"):
         run(["/opt/devkitpro/tools/bin/picasso", "-o", f"{B}/gen/{sh}.shbin", f"{ROOT}/port/shaders/{sh}.v.pica"])
         with open(f"{B}/gen/{sh}_shbin.s", "w") as f:
             run(["/opt/devkitpro/tools/bin/bin2s", f"{B}/gen/{sh}.shbin"], stdout=f)
-    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s"]
+    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s"]
     objs = []
     for s in srcs:
         o = f"{out}/{os.path.basename(s)}.o"
