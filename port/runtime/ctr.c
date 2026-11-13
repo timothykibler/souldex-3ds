@@ -24,8 +24,8 @@ void port_ctr_sleep_ns(int64_t ns) { svcSleepThread(ns); }
 void port_ctr_buttons(uint16_t *keyinput, uint16_t *xy) {
     hidScanInput();
     u32 k = hidKeysHeld();
-    static const u32 map[10] = { KEY_A, KEY_B, KEY_SELECT, KEY_START, KEY_DRIGHT, KEY_DLEFT,
-                                 KEY_DUP, KEY_DDOWN, KEY_R, KEY_L };
+    static const u32 map[10] = { KEY_A, KEY_B, KEY_SELECT, KEY_START, KEY_RIGHT, KEY_LEFT,  // (D-pad or Circle Pad)
+                                 KEY_UP, KEY_DOWN, KEY_R, KEY_L };
     uint16_t in = 0x03FF;
     for (int i = 0; i < 10; i++) {
         if (k & map[i]) in &= (uint16_t)~(1u << i);
