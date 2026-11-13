@@ -15,6 +15,7 @@
 #include "port.h"
 
 extern float port_g3_wide, port_g3_wide_y;
+void *port_linear_alloc(size_t bytes);
 
 typedef int32_t s32;
 typedef int64_t s64;
@@ -46,15 +47,25 @@ static void mtx_mul(Mtx d, const Mtx a, const Mtx b) {
 }
 
 static Mtx sProj, sPos, sVec, sTex, sClip;
+static float sClipF[16];  // the clip matrix pre-scaled for float vertices: x * [0..11] + [12..15]
 static Mtx sProjStack[1], sPosStack[32], sVecStack[32], sTexStack[1];
 static int sPosSp, sProjSp, sMode;
 static int sClipDirty = 1;
 
-// The result registers the game reads: the clip matrix (0x640) and the direction matrix (0x680).
-static void publish_matrices(void) {
+// The clip matrix (position x projection), computed when something needs it.
+static void update_clip(void) {
     if (!sClipDirty) return;
     mtx_mul(sClip, sPos, sProj);
     sClipDirty = 0;
+    // (vertices are 4.12 integers: clip = (v * M) >> 24, and the translation row (M << 12) >> 24)
+    for (int i = 0; i < 12; i++) sClipF[i] = (float)sClip[i] * (1.0f / 16777216.0f);
+    for (int i = 12; i < 16; i++) sClipF[i] = (float)sClip[i] * (1.0f / 4096.0f);
+}
+
+// The result registers the game reads (the clip matrix at 0x640, the direction matrix at 0x680),
+// written only when it reads them: G3X_GetClipMtx / G3X_GetVectorMtx are wrapped (port/build.py).
+static void publish_matrices(void) {
+    update_clip();
     volatile u32 *c = IO(0x640);
     for (int i = 0; i < 16; i++) c[i] = (u32)sClip[i];
     volatile u32 *v = IO(0x680);
@@ -99,7 +110,7 @@ static int sPrimN, sPrimCount;
 
 static void frames_init(void) {
     for (int i = 0; i < 2; i++) {
-        sFrames[i].v = malloc(sizeof(G3Vtx) * MAX_VTX);
+        sFrames[i].v = port_linear_alloc(sizeof(G3Vtx) * MAX_VTX);  // (drawn from where it is: GPU-visible)
         sFrames[i].p = malloc(sizeof(G3Poly) * MAX_POLY);
     }
 }
@@ -115,14 +126,12 @@ static void emit_triangles(const G3Vtx *v, int n) {
     if (((sPolyAttr >> 4) & 3) == 3) return;  // (shadow polygons: not yet)
     // culling: DS front faces are those drawn clockwise on screen, where y points down; here y
     // points up (clip space), so clockwise on screen is a positive area
-    float area = 0;
-    int allw = 1;
-    for (int i = 0; i < n; i++) if (v[i].w <= 0) allw = 0;
+    int allw = v[0].w > 0 && v[1].w > 0 && v[2].w > 0 && (n == 3 || v[3].w > 0);
     if (allw) {
-        for (int i = 0; i < n; i++) {
-            const G3Vtx *a = &v[i], *b = &v[(i + 1) % n];
-            area += (a->x / a->w) * (b->y / b->w) - (b->x / b->w) * (a->y / a->w);
-        }
+        // (the projected triangle's area times w0 w1 w2 > 0: its sign without dividing; a quad is
+        // planar and convex, its first three corners have its winding)
+        const G3Vtx *a = &v[0], *b = &v[1], *c = &v[2];
+        float area = (a->x * b->y - b->x * a->y) * c->w + (b->x * c->y - c->x * b->y) * a->w + (c->x * a->y - a->x * c->y) * b->w;
         int front = area > 0;
         if (front && !(sPolyAttr & 0x80)) return;
         if (!front && !(sPolyAttr & 0x40)) return;
@@ -138,6 +147,20 @@ static void emit_triangles(const G3Vtx *v, int n) {
         p = &f->p[f->np++];
         p->polyattr = sPolyAttr; p->teximage = sTexImage; p->pltt = sPltt;
         p->first = f->nv; p->count = 0; p->translucent = (u8)translucent;
+        p->s0 = p->t0 = 1e9f; p->s1 = p->t1 = -1e9f;
+    }
+    // (what the renderer needs per polygon and frame, while the values are at hand: texture
+    // bounds, and the opaque z/w range kept as fractions, compared without dividing)
+    for (int i = 0; i < n; i++) {
+        const G3Vtx *a = &v[i];
+        if (a->s < p->s0) p->s0 = a->s;
+        if (a->s > p->s1) p->s1 = a->s;
+        if (a->t < p->t0) p->t0 = a->t;
+        if (a->t > p->t1) p->t1 = a->t;
+        if (!translucent && a->w > 0) {
+            if (a->z * f->zd0 < f->zn0 * a->w) { f->zn0 = a->z; f->zd0 = a->w; }
+            if (a->z * f->zd1 > f->zn1 * a->w) { f->zn1 = a->z; f->zd1 = a->w; }
+        }
     }
     static const int quadIdx[6] = { 0, 1, 2, 0, 2, 3 };
     for (int i = 0; i < ntri * 3; i++) f->v[f->nv++] = v[n == 4 ? quadIdx[i] : i];
@@ -147,13 +170,15 @@ static void emit_triangles(const G3Vtx *v, int n) {
 static void add_vertex(s32 x, s32 y, s32 z) {
     sVx = x; sVy = y; sVz = z;
     if (sPrim < 0) return;
-    if (sClipDirty) publish_matrices();
+    if (sClipDirty) update_clip();
     G3Vtx v;
-    s64 cx = (s64)x * sClip[0] + (s64)y * sClip[4] + (s64)z * sClip[8] + ((s64)sClip[12] << 12);
-    s64 cy = (s64)x * sClip[1] + (s64)y * sClip[5] + (s64)z * sClip[9] + ((s64)sClip[13] << 12);
-    s64 cz = (s64)x * sClip[2] + (s64)y * sClip[6] + (s64)z * sClip[10] + ((s64)sClip[14] << 12);
-    s64 cw = (s64)x * sClip[3] + (s64)y * sClip[7] + (s64)z * sClip[11] + ((s64)sClip[15] << 12);
-    v.x = (float)cx / (1 << 24); v.y = (float)cy / (1 << 24); v.z = (float)cz / (1 << 24); v.w = (float)cw / (1 << 24);
+    // (in float: what the GPU draws needn't match the DS's fixed point to the last bit, and the
+    // 64-bit products and their conversions were most of the geometry engine's time)
+    const float fx = (float)x, fy = (float)y, fz = (float)z, *M = sClipF;
+    v.x = fx * M[0] + fy * M[4] + fz * M[8] + M[12];
+    v.y = fx * M[1] + fy * M[5] + fz * M[9] + M[13];
+    v.z = fx * M[2] + fy * M[6] + fz * M[10] + M[14];
+    v.w = fx * M[3] + fy * M[7] + fz * M[11] + M[15];
     int r = sColor & 31, g = (sColor >> 5) & 31, b = (sColor >> 10) & 31;
     v.r = (u8)(r << 3 | r >> 2); v.g = (u8)(g << 3 | g >> 2); v.b = (u8)(b << 3 | b >> 2);
     int a = alpha_of(sPolyAttr);
@@ -200,7 +225,7 @@ static void normal(u32 p) {
         sTs = sS + (s32)(((s64)nx * sTex[0] + (s64)ny * sTex[4] + (s64)nz * sTex[8]) >> 21);
         sTt = sT + (s32)(((s64)nx * sTex[1] + (s64)ny * sTex[5] + (s64)nz * sTex[9]) >> 21);
     }
-    if (sClipDirty) publish_matrices();
+    if (sClipDirty) update_clip();
     // the normal through the direction matrix (to .12)
     float n[3];
     for (int k = 0; k < 3; k++) n[k] = ((float)nx * sVec[0 * 4 + k] + (float)ny * sVec[1 * 4 + k] + (float)nz * sVec[2 * 4 + k]) / (512.0f * 4096.0f);
@@ -231,7 +256,7 @@ static void normal(u32 p) {
 static void box_test(const u32 *p) {
     s32 x = (int16_t)p[0], y = (int16_t)(p[0] >> 16), z = (int16_t)p[1];
     s32 w = (int16_t)(p[1] >> 16), h = (int16_t)p[2], d = (int16_t)(p[2] >> 16);
-    if (sClipDirty) publish_matrices();
+    if (sClipDirty) update_clip();
     // visible unless all 8 corners are outside the same clip plane
     int outside[6] = { 1, 1, 1, 1, 1, 1 };
     for (int c = 0; c < 8; c++) {
@@ -253,7 +278,7 @@ static void box_test(const u32 *p) {
 static void pos_test(const u32 *p) {
     s32 x = (int16_t)p[0], y = (int16_t)(p[0] >> 16), z = (int16_t)p[1];
     sVx = x; sVy = y; sVz = z;
-    if (sClipDirty) publish_matrices();
+    if (sClipDirty) update_clip();
     volatile u32 *r = IO(0x620);
     for (int k = 0; k < 4; k++)
         r[k] = (u32)(s32)(((s64)x * sClip[k] + (s64)y * sClip[4 + k] + (s64)z * sClip[8 + k] + ((s64)sClip[12 + k] << 12)) >> 12);
@@ -277,8 +302,6 @@ static const u8 kParams[256] = {
 
 static void run_cmd(u8 cmd, const u32 *p);
 
-// (the game reads the clip and direction matrices back right after matrix commands, so they're
-// kept current after every command that can change them)
 static u32 sHist[128], sTraceLeft;
 static void run(u8 cmd, const u32 *p) {
     sHist[cmd & 127]++;
@@ -290,8 +313,12 @@ static void run(u8 cmd, const u32 *p) {
         port_log("\n");
     }
     run_cmd(cmd, p);
-    if (cmd >= 0x10 && cmd <= 0x1C && sClipDirty) publish_matrices();
 }
+
+int __real_G3X_GetClipMtx(void *m);
+int __wrap_G3X_GetClipMtx(void *m) { publish_matrices(); return __real_G3X_GetClipMtx(m); }
+int __real_G3X_GetVectorMtx(void *m);
+int __wrap_G3X_GetVectorMtx(void *m) { publish_matrices(); return __real_G3X_GetVectorMtx(m); }
 
 static void run_cmd(u8 cmd, const u32 *p) {
     Mtx m;
@@ -421,6 +448,7 @@ static void init_once(void) {
     done = 1;
     mtx_identity(sProj); mtx_identity(sPos); mtx_identity(sVec); mtx_identity(sTex);
     frames_init();
+    for (int i = 0; i < 2; i++) { sFrames[i].zn0 = sFrames[i].zd0 = sFrames[i].zd1 = 1; sFrames[i].zn1 = -1; }
     sFrames[0].viewport[2] = sFrames[1].viewport[2] = 255;
     sFrames[0].viewport[3] = sFrames[1].viewport[3] = 191;
     // (written straight by the game's assembly: a value no game writes marks "nothing new")
@@ -465,10 +493,14 @@ void port_gx_fifo_write(u32 word) {
     }
 }
 
+uint64_t gG3Ticks;  // (profiling: CPU time in the geometry engine, display lists and register writes)
+uint64_t port_ctr_ticks(void);
 void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
     (void)dest;
+    uint64_t t = port_ctr_ticks();
     const u32 *s = src;
     for (u32 i = 0; i < bytes / 4; i++) port_gx_fifo_write(s[i]);
+    gG3Ticks += port_ctr_ticks() - t;
 }
 
 u32 port_gx_fifo_words(void) { return sFifoWords; }
@@ -557,6 +589,7 @@ int port_g3_vblank(void) {
     G3Frame *f = &sFrames[sBuild];
     f->nv = 0;
     f->np = 0;
+    f->zn0 = 1; f->zd0 = 1; f->zn1 = -1; f->zd1 = 1;
     memcpy(f->viewport, sFrames[!sBuild].viewport, 4);
     return 1;
 }

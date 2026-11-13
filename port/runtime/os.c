@@ -56,7 +56,10 @@ void port_vblank_irq_maybe(void) {
     INTR_CHECK |= OS_IE_V_BLANK;
 }
 
+static u64 sGameTicks, sFrameEnter, sFrameExit;
 void port_frame(void) {
+    sFrameEnter = port_ctr_ticks();
+    if (sFrameExit) sGameTicks += sFrameEnter - sFrameExit;  // (the game's own code since the last frame)
     if (!port_ctr_frame_wait()) port_ctr_exit(0);
     port_frame_count++;
     if (port_frame_count % 600 == 0) {
@@ -68,16 +71,25 @@ void port_frame(void) {
                  (unsigned long)(renderTicks / 600 / 268));
         last = now;
         renderTicks = 0;
-        extern u64 gProfBg, gProfObj, gProfMix, gGpu2dBusyTicks;
+        extern u64 gGpu2dBusyTicks;
         extern u64 gGpu2dMaxTicks;
         extern u32 gGpu2dRebuilds;
         port_log("  2D frame building (CPU): %lu us avg, %lu us worst, %lu BG rebuilds\n", (unsigned long)(gGpu2dBusyTicks / 600 / 268),
                  (unsigned long)(gGpu2dMaxTicks / 268), (unsigned long)gGpu2dRebuilds);
         gGpu2dBusyTicks = gGpu2dMaxTicks = 0;
         gGpu2dRebuilds = 0;
-        port_log("  BGs %lu us, sprites %lu us, mixing %lu us per frame\n", (unsigned long)(gProfBg / 600 / 268),
-                 (unsigned long)(gProfObj / 600 / 268), (unsigned long)(gProfMix / 600 / 268));
-        gProfBg = gProfObj = gProfMix = 0;
+        extern u64 gProfPlanes, gProfSprites, gProf3d;
+        port_log("  of which: BG planes %lu us, sprite sheet %lu us, 3D layer %lu us per frame\n", (unsigned long)(gProfPlanes / 600 / 268),
+                 (unsigned long)(gProfSprites / 600 / 268), (unsigned long)(gProf3d / 600 / 268));
+        extern u64 gProf3dTex, gProf3dWide, gProf3dIds;
+        port_log("  3D: textures %lu us, widening test %lu us, edge IDs %lu us\n", (unsigned long)(gProf3dTex / 600 / 268), (unsigned long)(gProf3dWide / 600 / 268), (unsigned long)(gProf3dIds / 600 / 268));
+        gProfPlanes = gProfSprites = gProf3d = gProf3dTex = gProf3dWide = gProf3dIds = 0;
+        extern u64 gGpu2dWaitTicks;
+        extern u64 gG3Ticks;
+        port_log("  geometry engine %lu us per frame (part of the game code)\n", (unsigned long)(gG3Ticks / 600 / 268));
+        gG3Ticks = 0;
+        port_log("  game code %lu us, waiting for the GPU / frame limit %lu us per frame\n", (unsigned long)(sGameTicks / 600 / 268), (unsigned long)(gGpu2dWaitTicks / 600 / 268));
+        sGameTicks = gGpu2dWaitTicks = 0;
     }
     port_input_update();
     extern void port_wm_frame(void);
@@ -129,6 +141,7 @@ void port_frame(void) {
             port_gpu2d_describe(1);
         }
     }
+    sFrameExit = port_ctr_ticks();
 }
 
 void OS_WaitIrq(BOOL clear, OSIrqMask irqFlags) {

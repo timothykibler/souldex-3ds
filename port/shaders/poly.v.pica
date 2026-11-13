@@ -1,5 +1,12 @@
-; The 3D renderer's vertex shader: positions arrive in clip space (the geometry engine did the
-; DS's transforms), colours and texture coordinates pass through.
+; The 3D renderer's vertex shader. Vertices come straight from the geometry engine (gx3d.c
+; G3Vtx, in GPU-visible memory): clip-space position as the DS computed it, colour as 4 bytes,
+; texture coordinates in texels. Here: y flipped (render-to-texture), x/y scaled when the view is
+; widened, the DS's z/w in -1..1 to the PICA's -w..0, colour to 0..1, texels to 0..1.
+.fvec xform      ; (x scale, y scale (negative), 0, 0)
+.fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
+
+.constf consts(0.00392156862745, 0.5, 0.0, 1.0)
+
 .out outpos position
 .out outclr color
 .out outtc0 texcoord0
@@ -9,8 +16,15 @@
 .alias intc  v2
 
 .proc main
-	mov outpos, inpos
-	mov outclr, inclr
-	mov outtc0, intc
+	mul r0.x, xform.x, inpos.x
+	mul r0.y, xform.y, inpos.y
+	add r1.x, inpos.z, -inpos.w
+	mul r0.z, consts.y, r1.x
+	mov r0.w, inpos.w
+	mov outpos, r0
+	mul outclr, consts.xxxx, inclr
+	mul r2.xy, tcscale.xy, intc.xy
+	mov r2.zw, consts.zw
+	mov outtc0, r2
 	end
 .end

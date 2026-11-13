@@ -1,0 +1,37 @@
+; Edge marking's polygon-ID pass: positions and texture coordinates as poly.v.pica, the colour is
+; (polygon ID, depth, 0, 1) with depth = A + B * z/w spread over the frame's range (larger is
+; nearer; A = B = 0 for translucent polygons, which only clear the edge flag).
+.fvec xform      ; (x scale, y scale (negative), 0, 0)
+.fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
+.fvec idp        ; (ID * 4 / 255, A, B, 0)
+
+.constf consts(0.0, 0.5, 0.0, 1.0)
+
+.out outpos position
+.out outclr color
+.out outtc0 texcoord0
+
+.alias inpos v0
+.alias inclr v1
+.alias intc  v2
+
+.proc main
+	mul r0.x, xform.x, inpos.x
+	mul r0.y, xform.y, inpos.y
+	add r1.x, inpos.z, -inpos.w
+	mul r0.z, consts.y, r1.x
+	mov r0.w, inpos.w
+	mov outpos, r0
+	rcp r3.x, inpos.w
+	mul r3.x, inpos.z, r3.x
+	mul r3.x, idp.z, r3.x
+	add r3.y, idp.y, r3.x
+	mov r4.x, idp.x
+	mov r4.y, r3.y
+	mov r4.zw, consts.zw
+	mov outclr, r4
+	mul r2.xy, tcscale.xy, intc.xy
+	mov r2.zw, consts.zw
+	mov outtc0, r2
+	end
+.end

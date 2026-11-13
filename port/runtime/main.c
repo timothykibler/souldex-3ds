@@ -12,7 +12,7 @@
 #define PORT_DIR "sdmc:/3ds/soulsilver-3ds"
 
 static FILE *gLog;
-uint32_t port_test3d, port_trace3d;
+uint32_t port_trace3d;
 
 void port_log(const char *fmt, ...) {
     va_list ap;
@@ -87,7 +87,6 @@ int main(void) {
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
-            else if (!strncmp(line, "test3d", 6)) { extern uint32_t port_test3d, port_trace3d; port_test3d = 1; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
             else if (sscanf(line, "mash %u %u %u %15s", &n, &m, &per, key) == 4) {
                 void port_input_mash(uint32_t frame, uint32_t until, uint32_t period, const char *name);

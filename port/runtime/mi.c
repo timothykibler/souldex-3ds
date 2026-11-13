@@ -29,7 +29,10 @@ void MIi_CpuCopy32(const void *srcp, void *destp, u32 size) { memmove(destp, src
 void MIi_CpuSend32(const void *srcp, volatile void *destp, u32 size) {
     const u32 *s = srcp;
     if (is_gxfifo(destp)) {
+        extern u64 gG3Ticks;
+        u64 t = port_ctr_ticks();
         for (u32 i = 0; i < size / 4; i++) port_gx_fifo_write(s[i]);
+        gG3Ticks += port_ctr_ticks() - t;
         return;
     }
     for (u32 i = 0; i < size / 4; i++) *(vu32 *)destp = s[i];

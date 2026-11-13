@@ -16,6 +16,7 @@ void port_ctr_exit(int code) {
 }
 
 uint64_t port_ctr_ticks(void) { return svcGetSystemTick(); }
+void *port_linear_alloc(size_t bytes) { return linearAlloc(bytes); }  // (memory the GPU can read)
 void port_ctr_sleep_ns(int64_t ns) { svcSleepThread(ns); }
 
 // DS buttons from the 3DS's: REG_KEYINPUT bits (A, B, SELECT, START, right, left, up, down, R, L)

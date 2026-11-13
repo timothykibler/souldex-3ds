@@ -17,6 +17,7 @@ typedef struct {
     uint32_t pltt;        // PLTT_BASE
     uint32_t first, count;  // triangles' vertices in the frame's vertex array (count = 3 per triangle)
     uint8_t translucent;
+    float s0, s1, t0, t1;   // texture coordinates' bounds (texels)
 } G3Poly;
 
 typedef struct {
@@ -25,6 +26,7 @@ typedef struct {
     uint32_t nv, np;
     uint32_t swap;        // SWAP_BUFFERS parameter
     uint8_t viewport[4];  // x1, y1, x2, y2 (y from the bottom)
+    float zn0, zd0, zn1, zd1;  // the opaque vertices' z/w range, as fractions (min zn0/zd0, max zn1/zd1)
 } G3Frame;
 
 // The last frame the game swapped in (what the DS would now be showing), or NULL before the first.

@@ -172,14 +172,19 @@ typedef struct {
     C3D_Tex tex;
     int w, h, ready;
     u32 hash;
-    // what the text plane was last built from, to rebuild only the tiles that changed
+    // what the text plane was last built from, to redraw only the tiles that changed
     u16 *map;        // map entries (w/8 * h/8)
     u8 *chars;       // tile data (1024 tiles)
+    u32 *used;       // per tile: the colour indices its pixels use (256 bits; bit 0, transparent, never)
+    u32 *seen;       // per tile: the frame its data was last compared
     u16 pal[256];    // palette as converted
+    u16 *extpal;     // extended palette as read (16 x 256 colours)
     u32 cb, sb;
-    int bpp8;
+    int bpp8, built;
     const u8 *ext;
 } Plane;
+static u32 sPlaneFrame;
+u64 gProfPlanes, gProfSprites, gProf3d, gProf3dTex, gProf3dWide, gProf3dIds;  // CPU ticks in BG planes, the sprite sheet, the 3D layer
 static Plane sPlane[2][4];
 extern u32 gGpu2dRebuilds;
 
@@ -214,7 +219,10 @@ static void put_tile(u16 *dst, const u8 *src, int bpp8, int hf, int vf, const u1
 
 static u16 sPal[2][2][256];  // [engine][bg/obj]: this frame's palettes as RGBA5551
 
-// Text BG: the whole map (256 or 512 square) into its plane.
+// Text BG: the whole map (256 or 512 square) into its plane. Each frame the map, the tiles it
+// uses and the palette are compared with what the plane was drawn from, and only tiles whose map
+// entry, pixels or used colours changed are drawn again (a palette fade or colour cycle redraws
+// just the tiles using those colours, also for 256-colour and extended-palette BGs).
 static Plane *text_plane(const Eng *e, int bg) {
     u16 cnt = rd16(e->io + 8 + bg * 2);
     int size = cnt >> 14;
@@ -222,60 +230,85 @@ static Plane *text_plane(const Eng *e, int bg) {
     u32 cb = char_base(e, cnt), sb = screen_base(e, cnt);
     int bpp8 = (cnt >> 7) & 1;
     const u8 *ext = (bpp8 && (e->dispcnt & (1u << 30))) ? ext_palette(e, (bg < 2 && (cnt & 0x2000)) ? bg + 2 : bg) : NULL;
-    u32 mapbytes = (u32)(w / 256) * (h / 256) * 0x800;
-    // hash: the map, the tiles it can reach, the palette
-    u32 hsh = hash_vram(2166136261u ^ cnt, e->bgv, e->bgsize, sb, mapbytes);
-    u32 maxtile = 0;
-    for (u32 i = 0; i < mapbytes; i += 2) {
-        u16 ent = rd16(e->bgv + ((sb + i) & (e->bgsize - 1)));
-        if ((ent & 0x3FF) > maxtile) maxtile = ent & 0x3FF;
-    }
-    hsh = hash_vram(hsh, e->bgv, e->bgsize, cb, (maxtile + 1) * (bpp8 ? 64 : 32));
-    hsh = ext ? hash_bytes(hsh, ext, 0x2000) : hash_bytes(hsh, (const u8 *)sPal[!e->main][0], 512);
     Plane *p = &sPlane[!e->main][bg];
     if (!plane_alloc(p, w, h, true)) return NULL;
-    if (p->hash == hsh) return p;
-    p->hash = hsh;
-    gGpu2dRebuilds++;
-    u16 *data = p->tex.data;
-    int ntx = w / 8, nty = h / 8;
-    u32 tilebytes = bpp8 ? 64 : 32;
     if (!p->map) {
         p->map = malloc(64 * 64 * 2);
         p->chars = malloc(1024 * 64);
-        if (!p->map || !p->chars) return NULL;
-        p->cb = ~0u;
+        p->used = malloc(1024 * 32);
+        p->seen = calloc(1024, 4);
+        p->extpal = malloc(16 * 256 * 2);
+        if (!p->map || !p->chars || !p->used || !p->seen || !p->extpal) return NULL;
+        p->built = 0;
     }
-    // Full rebuild when the layout changed; otherwise only tiles whose entry, pixels or palette
-    // row (16 colours; the whole palette for 256 colours) changed.
+    u16 *data = p->tex.data;
+    int ntx = w / 8, nty = h / 8;
+    u32 tilebytes = bpp8 ? 64 : 32;
+    int full = !p->built || p->cb != cb || p->sb != sb || p->bpp8 != bpp8 || p->ext != ext || p->hash != (u32)(w << 16 | h);
+    // which colours changed: one 256-bit set, or one per extended sub-palette
     const u16 *pal = sPal[!e->main][0];
-    int full = p->cb != cb || p->sb != sb || p->bpp8 != bpp8 || p->ext != ext || ext;
-    u16 rowChanged = 0;  // bit per 16-colour row
-    for (int r = 0; r < 16; r++) if (memcmp(p->pal + r * 16, pal + r * 16, 32)) rowChanged |= (u16)(1 << r);
-    if (bpp8 && rowChanged) full = 1;
-    static u8 tileChanged[1024];
-    for (u32 t = 0; t <= maxtile; t++) {
-        const u8 *src = e->bgv + ((cb + t * tilebytes) & (e->bgsize - 1));
-        tileChanged[t] = full || memcmp(p->chars + t * 64, src, tilebytes) != 0;
-        if (tileChanged[t]) memcpy(p->chars + t * 64, src, tilebytes);
+    static u32 chg[16][8];
+    int anyChg = 0;
+    if (ext) {
+        memset(chg, 0, sizeof(chg));
+        for (int i = 0; i < 4096; i++) {
+            u16 c = rd16(ext + i * 2);
+            if (c != p->extpal[i]) { chg[i >> 8][(i >> 5) & 7] |= 1u << (i & 31); p->extpal[i] = c; anyChg = 1; }
+        }
+    } else {
+        memset(chg[0], 0, sizeof(chg[0]));
+        for (int i = 0; i < 256; i++)
+            if (pal[i] != p->pal[i]) { chg[0][i >> 5] |= 1u << (i & 31); p->pal[i] = pal[i]; anyChg = 1; }
     }
-    memcpy(p->pal, pal, sizeof(p->pal));
-    p->cb = cb; p->sb = sb; p->bpp8 = bpp8; p->ext = ext;
+    if (full && !ext) memcpy(p->pal, pal, sizeof(p->pal));
+    if (full && ext) for (int i = 0; i < 4096; i++) p->extpal[i] = rd16(ext + i * 2);
+    p->cb = cb; p->sb = sb; p->bpp8 = bpp8; p->ext = ext; p->hash = (u32)(w << 16 | h); p->built = 1;
+    u32 frame = ++sPlaneFrame;
+    static u8 tileChanged[1024];
+    int drawn = 0;
     for (int ty = 0; ty < nty; ty++) {
         for (int tx = 0; tx < ntx; tx++) {
             u32 block = (u32)((ty >> 5) * (w >> 8) + (tx >> 5));
             u16 ent = rd16(e->bgv + ((sb + block * 0x800 + ((ty & 31) * 32 + (tx & 31)) * 2) & (e->bgsize - 1)));
-            u16 *old = &p->map[ty * ntx + tx];
             u32 tile = ent & 0x3FF;
-            if (!full && *old == ent && !tileChanged[tile] && !(!bpp8 && (rowChanged >> (ent >> 12)) & 1)) continue;
-            *old = ent;
             const u8 *src = e->bgv + ((cb + tile * tilebytes) & (e->bgsize - 1));
+            if (p->seen[tile] != frame) {  // (each tile's pixels compared once a frame)
+                p->seen[tile] = frame;
+                u8 *mine = p->chars + tile * 64;
+                tileChanged[tile] = full || memcmp(mine, src, tilebytes) != 0;
+                if (tileChanged[tile]) {
+                    memcpy(mine, src, tilebytes);
+                    u32 *u = p->used + tile * 8;
+                    memset(u, 0, 32);
+                    for (u32 i = 0; i < tilebytes; i++) {
+                        if (bpp8) u[mine[i] >> 5] |= 1u << (mine[i] & 31);
+                        else u[0] |= 1u << (mine[i] & 15) | 1u << (mine[i] >> 4);
+                    }
+                    u[0] &= ~1u;
+                }
+            }
+            u16 *old = &p->map[ty * ntx + tx];
+            int redraw = full || *old != ent || tileChanged[tile];
+            if (!redraw && anyChg) {
+                const u32 *u = p->used + tile * 8;
+                if (!bpp8) redraw = ((chg[0][ent >> 13] >> ((ent >> 12 & 1) * 16)) & 0xFFFF & u[0]) != 0;
+                else {
+                    const u32 *c = chg[ext ? ent >> 12 : 0];
+                    for (int k = 0; k < 8 && !redraw; k++) redraw = (c[k] & u[k]) != 0;
+                }
+            }
+            if (!redraw) continue;
+            *old = ent;
+            drawn++;
             const u16 *pal16 = bpp8 ? pal : pal + (ent >> 12) * 16;
             const u8 *pal256 = ext ? ext + (ent >> 12) * 512 : NULL;
             put_tile(tex_tile(data, w, h, tx, ty), src, bpp8, (ent >> 10) & 1, (ent >> 11) & 1, pal16, pal256);
         }
     }
-    C3D_TexFlush(&p->tex);
+    if (drawn) {
+        gGpu2dRebuilds++;
+        C3D_TexFlush(&p->tex);
+    }
     return p;
 }
 
@@ -337,25 +370,20 @@ static Plane *affine_plane(const Eng *e, int bg, int extended, int *wrapOut) {
     return p;
 }
 
-// ---------------------------------------------------------------- sprite sheet (per frame)
-#define SHEET 512
+// ---------------------------------------------------------------- sprite sheet
+// Every OAM entry has its own 64x64 cell (a 1024x512 sheet, 16 x 8 cells), drawn again only when
+// what it shows changed: its attributes, its tile bytes or its palette (a hash of those).
+#define SHEET_W 1024
+#define SHEET_H 512
 static C3D_Tex sSheet[2];
-static int sShelfX, sShelfY, sShelfH;
+static u32 sCellKey[2][128][2];  // [engine][OAM index]: attributes, data hash (0: empty)
 
 static bool sheet_alloc(int e) {
     if (sSheet[e].data) return true;
-    if (!C3D_TexInit(&sSheet[e], SHEET, SHEET, GPU_RGBA5551)) return false;
+    if (!C3D_TexInit(&sSheet[e], SHEET_W, SHEET_H, GPU_RGBA5551)) return false;
     C3D_TexSetFilter(&sSheet[e], GPU_NEAREST, GPU_NEAREST);
     C3D_TexSetWrap(&sSheet[e], GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
-    return true;
-}
-
-static bool sheet_place(int w, int h, int *x, int *y) {
-    if (sShelfX + w > SHEET) { sShelfX = 0; sShelfY += sShelfH; sShelfH = 0; }
-    if (sShelfY + h > SHEET) return false;
-    *x = sShelfX; *y = sShelfY;
-    sShelfX += w;
-    if (h > sShelfH) sShelfH = h;
+    memset(sCellKey[e], 0, sizeof(sCellKey[e]));
     return true;
 }
 
@@ -381,8 +409,8 @@ static void sprites_build(const Eng *e) {
     sNumSpr[ei] = 0;
     if (!(e->dispcnt & 0x1000) && !(e->dispcnt & 0x8000)) return;
     if (!sheet_alloc(ei)) return;
-    sShelfX = sShelfY = sShelfH = 0;
     u16 *sheet = sSheet[ei].data;
+    int sheetDirty = 0;
     int map1d = (e->dispcnt >> 4) & 1;
     u32 bshift = (e->dispcnt >> 20) & 3;
     if (!e->main && bshift > 2) bshift = 2;
@@ -403,10 +431,10 @@ static void sprites_build(const Eng *e) {
         if (x + bw <= 0 || x >= 256 || y + bh <= 0 || y >= 192) continue;
         int cx = 0, cy = 0;
         u16 *dst = sheet;
-        int dstW = SHEET, dstH = SHEET;
+        int dstW = SHEET_W, dstH = SHEET_H;
         C3D_Tex *atex = NULL;
         if (affine) {
-            atex = &sAffTex[ei][sNumSpr[ei]];
+            atex = &sAffTex[ei][i];
             if (atex->data && (atex->width != w || atex->height != h)) { C3D_TexDelete(atex); atex->data = NULL; }
             if (!atex->data) {
                 if (!C3D_TexInit(atex, (u16)w, (u16)h, GPU_RGBA5551)) continue;
@@ -415,8 +443,8 @@ static void sprites_build(const Eng *e) {
                 atex->border = 0;
             }
             dst = atex->data; dstW = w; dstH = h;
-        } else if (!sheet_place(w, h, &cx, &cy)) {
-            break;
+        } else {
+            cx = (i & 15) * 64; cy = (i >> 4) * 64;  // (its own cell)
         }
         int ix = cx, iy = cy;
         int bpp8 = (a0 >> 13) & 1;
@@ -425,7 +453,18 @@ static void sprites_build(const Eng *e) {
         int hf = !affine && ((a1 >> 12) & 1), vf = !affine && ((a1 >> 13) & 1);
         const u16 *pal16 = bpp8 ? sPal[ei][1] : sPal[ei][1] + pal * 16;
         const u8 *pal256 = (bpp8 && ext) ? ext + pal * 512 : NULL;
-        for (int ty = 0; ty < h / 8; ty++) {
+        // drawn again only if what the cell shows changed
+        u32 k0 = (u32)(a0 & 0xE300) | (u32)(affine ? 0 : a1 & 0x3000) << 16 | (u32)(a1 & 0xC000) << 2;
+        u32 k1 = (u32)(a2 & 0xF3FF) | (u32)map1d << 16 | bshift << 17 | (u32)(ext != NULL) << 19;
+        u32 tb = bpp8 ? 64 : 32, hsh = 2166136261u;
+        if (map1d) hsh = hash_vram(hsh, e->objv, e->objsize, tile << (5 + bshift), (u32)(w / 8) * (h / 8) * tb);
+        else for (int ty = 0; ty < h / 8; ty++) hsh = hash_vram(hsh, e->objv, e->objsize, tile * 32 + (u32)ty * 1024, (u32)(w / 8) * tb);
+        hsh = pal256 ? hash_bytes(hsh, pal256, 512) : hash_bytes(hsh, (const u8 *)pal16, bpp8 ? 512 : 32);
+        hsh = (hsh ^ k1) | 1;
+        u32 *key = sCellKey[ei][i] ;
+        int same = key[0] == k0 && key[1] == hsh && !(affine && sAffTex[ei][i].data != atex->data);
+        if (!same) { key[0] = k0; key[1] = hsh; }
+        for (int ty = 0; ty < h / 8 && !same; ty++) {
             for (int tx = 0; tx < w / 8; tx++) {
                 u32 addr;
                 if (map1d) addr = (tile << (5 + bshift)) + (u32)(ty * (w / 8) + tx) * (bpp8 ? 64 : 32);
@@ -438,14 +477,14 @@ static void sprites_build(const Eng *e) {
         Spr *s = &sSpr[ei][sNumSpr[ei]++];
         *s = (Spr){ (s16)x, (s16)y, (s16)bw, (s16)bh, (s16)w, (s16)h, (s16)ix, (s16)iy,
                     (u8)((a2 >> 10) & 3), (u8)mode, (u8)affine, (u8)i, { 1, 0, 0, 1 }, atex };
-        if (atex) C3D_TexFlush(atex);
+        if (!same) { if (atex) C3D_TexFlush(atex); else sheetDirty = 1; }
         if (affine) {
             const u8 *p = e->oam + ((a1 >> 9) & 31) * 32;
             s->m[0] = (int16_t)rd16(p + 6) / 256.0f; s->m[1] = (int16_t)rd16(p + 14) / 256.0f;
             s->m[2] = (int16_t)rd16(p + 22) / 256.0f; s->m[3] = (int16_t)rd16(p + 30) / 256.0f;
         }
     }
-    if (sNumSpr[ei]) C3D_TexFlush(&sSheet[ei]);
+    if (sheetDirty) C3D_TexFlush(&sSheet[ei]);
 }
 
 // ---------------------------------------------------------------- GPU state helpers
@@ -551,6 +590,7 @@ static C3D_Tex sIdTex;                 // edge marking's polygon-ID image (see t
 static C3D_RenderTarget *sIdTarget;
 static int s3dHave;
 static void render3d(int screenW);
+static void flush_edge_vertices(void);
 static bool init3d(void);
 
 static void bg_quads(void *arg) {
@@ -590,9 +630,9 @@ static void spr_quads(void *arg) {
     SprDraw *d = arg;
     const Spr *s = d->s;
     C3D_TexBind(0, &sSheet[d->ei]);
-    const float S = SHEET;
+    const float SW = SHEET_W, SH = SHEET_H;
     if (!s->affine) {
-        quad(s->x, s->y, s->x + s->w, s->y + s->h, s->sx / S, s->sy / S, (s->sx + s->w) / S, (s->sy + s->h) / S);
+        quad(s->x, s->y, s->x + s->w, s->y + s->h, s->sx / SW, s->sy / SH, (s->sx + s->w) / SW, (s->sy + s->h) / SH);
         return;
     }
     C3D_TexBind(0, s->tex);
@@ -751,7 +791,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     else flat(bgr8_abgr(backdrop), 0, 0, 256, 192);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     if (dmode >= 2) { engine_from_software(ei); return; }
-    sprites_build(e);
+    { u64 t = svcGetSystemTick(); sprites_build(e); gProfSprites += svcGetSystemTick() - t; }
     if (mx.windows) windows_to_stencil(e, mx.windows, ei);
     C3D_AlphaTest(true, GPU_GREATER, 0);
 
@@ -772,7 +812,9 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
         else kind = (bgmode == 0) ? 0 : (bgmode <= 2 ? 1 : (bgmode <= 5 ? 2 : -1));
         if (kind < 0) continue;
         int wrap = 1;
+        u64 tp = svcGetSystemTick();
         Plane *p = kind == 0 ? text_plane(e, bg) : affine_plane(e, bg, kind == 2, &wrap);
+        gProfPlanes += svcGetSystemTick() - tp;
         if (!p) continue;
         bgd[bg] = (BgDraw){ e, bg, p, kind };
         on[bg] = 1;
@@ -849,21 +891,24 @@ bool port_gpu2d_init(void) {
 // Draws both engines onto their screens (engine A on top when POWCNT1 bit 15 says so).
 static int sReadable;  // (screenshot mode: single-buffered screens, so what's shown can be read)
 
-u64 gGpu2dBusyTicks;  // CPU time building the frame (not waiting for the GPU or the VBlank)
+u64 gGpu2dBusyTicks;
+u64 gGpu2dWaitTicks;  // waiting in C3D_FrameBegin (the GPU's previous frame, the frame-rate limit)  // CPU time building the frame (not waiting for the GPU or the VBlank)
 u64 gGpu2dMaxTicks;   // the slowest frame
 u32 gGpu2dRebuilds;   // BG textures rebuilt
 
 void port_gpu2d_frame(void) {
     if (!sReady) return;
+    u64 tw = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     u64 t0 = svcGetSystemTick();
+    gGpu2dWaitTicks += t0 - tw;
     sVtxUsed = 0;
     C3D_BindProgram(&sProg);
     static Eng a, b;
     a = (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
-    render3d(a_on_top ? 400 : 320);
+    { u64 t = svcGetSystemTick(); render3d(a_on_top ? 400 : 320); gProf3d += svcGetSystemTick() - t; }
     C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0x000000FF, 0);
     C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0x000000FF, 0);
     render_engine(&a, a_on_top ? sTop : sBottom, a_on_top ? 400 : 320);
@@ -871,6 +916,9 @@ void port_gpu2d_frame(void) {
     u64 dt = svcGetSystemTick() - t0;
     gGpu2dBusyTicks += dt;
     if (dt > gGpu2dMaxTicks) gGpu2dMaxTicks = dt;
+    // (vertices the CPU wrote this frame, out of its data cache before the GPU reads them)
+    GSPGPU_FlushDataCache(sVbo, sVtxUsed * sizeof(Vtx));
+    flush_edge_vertices();
     C3D_FrameEnd(0);
 }
 
@@ -963,12 +1011,19 @@ void port_gpu2d_describe(int engine) {
 }
 
 // ================================================================ the 3D layer
-// The geometry engine's polygons (gx3d.c), drawn into a 256x256 image with depth, which the 2D
-// compositor then shows as BG0. DS textures are decoded from the texture slots (the VRAM banks
-// mapped for textures, read where the game wrote them: through LCDC) into RGBA8 and cached.
+// The geometry engine's polygons (gx3d.c), drawn into an image of the screen's size with depth,
+// which the 2D compositor then shows as BG0. The vertices are drawn where the geometry engine
+// wrote them (GPU-visible memory): the vertex shaders (poly.v.pica, polyid.v.pica) do what's
+// left of the conversion, so the CPU touches no vertex. DS textures are decoded from the texture
+// slots (the VRAM banks mapped for textures, read where the game wrote them: through LCDC).
 
 extern const u8 poly_shbin[];
 extern const u32 poly_shbin_size;
+extern const u8 polyid_shbin[];
+extern const u32 polyid_shbin_size;
+static DVLB_s *sDvlbId;
+static shaderProgram_s sProgId;
+static int sLocXform, sLocTc, sLocXformId, sLocTcId, sLocIdp;
 extern const u8 edge_shbin[];
 extern const u32 edge_shbin_size;
 static DVLB_s *sDvlb3d, *sDvlbEdge;
@@ -979,10 +1034,8 @@ static C3D_RenderTarget *s3dTarget;
 typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
 static VE *sVboEdge;
 static int s3dReady;
+static void flush_edge_vertices(void) { if (sVboEdge) GSPGPU_FlushDataCache(sVboEdge, sizeof(VE) * 6 * 8); }
 
-typedef struct { float x, y, z, w, r, g, b, a, s, t; } V3;
-#define MAX_V3 24576
-static V3 *sVbo3d;
 
 static void attrs_2d(void) {
     C3D_AttrInfo *ai = C3D_GetAttrInfo();
@@ -994,23 +1047,30 @@ static void attrs_2d(void) {
     BufInfo_Add(bi, sVbo, sizeof(Vtx), 2, 0x10);
 }
 
-static void attrs_3d(void) {
+// The geometry engine's vertices as they are (G3Vtx): position float4, colour 4 bytes, texels float2.
+static void attrs_3d(const G3Frame *f) {
     C3D_AttrInfo *ai = C3D_GetAttrInfo();
     AttrInfo_Init(ai);
     AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
-    AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
     AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
-    BufInfo_Add(bi, sVbo3d, sizeof(V3), 3, 0x210);
+    BufInfo_Add(bi, f->v, sizeof(G3Vtx), 3, 0x210);
 }
 
 static bool init3d(void) {
     sDvlb3d = DVLB_ParseFile((u32 *)poly_shbin, poly_shbin_size);
     shaderProgramInit(&sProg3d);
     shaderProgramSetVsh(&sProg3d, &sDvlb3d->DVLE[0]);
-    sVbo3d = linearAlloc(sizeof(V3) * MAX_V3);
-    if (!sVbo3d) return false;
+    sLocXform = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "xform");
+    sLocTc = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "tcscale");
+    sDvlbId = DVLB_ParseFile((u32 *)polyid_shbin, polyid_shbin_size);
+    shaderProgramInit(&sProgId);
+    shaderProgramSetVsh(&sProgId, &sDvlbId->DVLE[0]);
+    sLocXformId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "xform");
+    sLocTcId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "tcscale");
+    sLocIdp = shaderInstanceGetUniformLocation(sProgId.vertexShader, "idp");
     if (!C3D_TexInitVRAM(&s3dTex, 512, 256, GPU_RGBA8)) return false;
     C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
     s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
@@ -1060,14 +1120,14 @@ static inline u32 rgba(u16 c, u8 a) {
     u32 r = c & 31, g = (c >> 5) & 31, b = (c >> 10) & 31;
     return (r << 3 | r >> 2) << 24 | (g << 3 | g >> 2) << 16 | (b << 3 | b >> 2) << 8 | a;
 }
-static inline u32 *tex32_px(u32 *data, int W, int H, int x, int y) {
-    int row = (H >> 3) - 1 - (y >> 3);
-    return data + (row * (W >> 3) + (x >> 3)) * 64 + sMorton[(7 - (y & 7)) * 8 + (x & 7)];
-}
-
+// Decoded textures, cached per (texture, palette). Only the part the frame's polygons use is
+// decoded (their texture coordinates' bounds, in 8x8 tiles; the whole texture when they repeat),
+// and a cached part is decoded again when the texel rows or the palette it came from change.
+// Formats with 1-bit alpha decode exactly to RGBA5551; A3I5 and A5I3 need RGBA8.
 typedef struct {
     u32 key, pltt, hash, hashFrame, used;
-    int w, h;
+    int w, h, fmt;
+    int r0, r1, c0, c1;  // decoded tile rows [r0, r1), columns [c0, c1) (empty: r0 == r1)
     C3D_Tex tex;
 } TexEntry;
 #define TEX_CACHE 192
@@ -1082,66 +1142,105 @@ static u32 pal_bytes(int fmt) {
     static const u16 n[8] = { 0, 64, 8, 32, 512, 0x400, 16, 0 };  // (4x4: up to a block's reach; approximate)
     return n[fmt];
 }
+static int tex_wide(int fmt) { return fmt == 1 || fmt == 6; }  // (RGBA8 texels)
 
-static void decode_texture(u32 *out, int w, int h, int fmt, int color0, u32 addr, u32 pltt) {
+// Tile rows [r0, r1) x columns [c0, c1) of the texture into its texels.
+static void decode_texture(void *out, int w, int h, int fmt, int color0, u32 addr, u32 pltt, int r0, int r1, int c0, int c1) {
     const u8 *src = tex_ptr(addr);
     u32 paddr = fmt == 2 ? pltt << 3 : pltt << 4;
     const u8 *pal = pal_ptr(paddr);
+    int wide = tex_wide(fmt);
+    #define TILE(tx, ty) ((H8 - 1 - (ty)) * W8 + (tx)) * 64
+    const int W8 = w >> 3, H8 = h >> 3;
     if (!src || (fmt != 7 && !pal)) {
-        for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) *tex32_px(out, w, h, x, y) = 0xFF00FFFF;  // (missing: magenta)
+        for (int ty = r0; ty < r1; ty++) for (int tx = c0; tx < c1; tx++) for (int k = 0; k < 64; k++) {
+            if (wide) ((u32 *)out)[TILE(tx, ty) + k] = 0xFF00FFFF; else ((u16 *)out)[TILE(tx, ty) + k] = 0xF83F;  // (missing: magenta)
+        }
         return;
     }
     if (fmt == 5) {  // 4x4 compressed: 32-bit texel blocks, 16-bit palette info in slot 1
         u32 iaddr = 0x20000 + ((addr & 0x1FFFF) >> 1) + ((addr >> 17) == 2 ? 0x10000 : 0);
         const u8 *idx = tex_ptr(iaddr);
-        for (int by = 0; by < h / 4; by++) {
-            for (int bx = 0; bx < w / 4; bx++) {
+        u16 *o = out;
+        for (int by = r0 * 2; by < r1 * 2; by++) {
+            for (int bx = c0 * 2; bx < c1 * 2; bx++) {
                 int blk = by * (w / 4) + bx;
                 u32 bits = rd32(src + blk * 4);
                 u16 info = idx ? rd16(idx + blk * 2) : 0;
                 const u8 *pb = pal_ptr(paddr + (info & 0x3FFF) * 4);
-                u32 c[4] = { 0, 0, 0, 0 };
+                u16 c[4] = { 0, 0, 0, 0 };
                 if (pb) {
-                    u16 c0 = rd16(pb), c1 = rd16(pb + 2);
+                    u16 k0 = rd16(pb), k1 = rd16(pb + 2);
                     int mode = info >> 14;
-                    c[0] = rgba(c0, 255); c[1] = rgba(c1, 255);
+                    c[0] = sColor[k0 & 0x7FFF]; c[1] = sColor[k1 & 0x7FFF];
                     #define MIX(a, b, wa, wb, d) (((((a) & 31) * (wa) + ((b) & 31) * (wb)) / (d)) | (((((a) >> 5) & 31) * (wa) + (((b) >> 5) & 31) * (wb)) / (d)) << 5 | (((((a) >> 10) & 31) * (wa) + (((b) >> 10) & 31) * (wb)) / (d)) << 10)
-                    if (mode == 0) { c[2] = rgba(rd16(pb + 4), 255); c[3] = 0; }
-                    else if (mode == 1) { c[2] = rgba((u16)MIX(c0, c1, 1, 1, 2), 255); c[3] = 0; }
-                    else if (mode == 2) { c[2] = rgba(rd16(pb + 4), 255); c[3] = rgba(rd16(pb + 6), 255); }
-                    else { c[2] = rgba((u16)MIX(c0, c1, 5, 3, 8), 255); c[3] = rgba((u16)MIX(c0, c1, 3, 5, 8), 255); }
+                    if (mode == 0) c[2] = sColor[rd16(pb + 4) & 0x7FFF];
+                    else if (mode == 1) c[2] = sColor[MIX(k0, k1, 1, 1, 2) & 0x7FFF];
+                    else if (mode == 2) { c[2] = sColor[rd16(pb + 4) & 0x7FFF]; c[3] = sColor[rd16(pb + 6) & 0x7FFF]; }
+                    else { c[2] = sColor[MIX(k0, k1, 5, 3, 8) & 0x7FFF]; c[3] = sColor[MIX(k0, k1, 3, 5, 8) & 0x7FFF]; }
                     #undef MIX
                 }
+                u16 *t = o + TILE(bx >> 1, by >> 1);
                 for (int y = 0; y < 4; y++)
-                    for (int x = 0; x < 4; x++) *tex32_px(out, w, h, bx * 4 + x, by * 4 + y) = c[(bits >> ((y * 4 + x) * 2)) & 3];
+                    for (int x = 0; x < 4; x++)
+                        t[sMorton[(7 - ((by & 1) * 4 + y)) * 8 + (bx & 1) * 4 + x]] = c[(bits >> ((y * 4 + x) * 2)) & 3];
             }
         }
         return;
     }
-    for (int y = 0; y < h; y++) {
-        for (int x = 0; x < w; x++) {
-            int i = y * w + x;
-            u32 c;
-            switch (fmt) {
-            case 1: { u8 b = src[i]; int a = b >> 5; c = rgba(rd16(pal + (b & 31) * 2), (u8)((a << 5) | (a << 2) | (a >> 1))); break; }
-            case 2: { int v = (src[i >> 2] >> ((i & 3) * 2)) & 3; c = (color0 && !v) ? 0 : rgba(rd16(pal + v * 2), 255); break; }
-            case 3: { int v = (src[i >> 1] >> ((i & 1) * 4)) & 15; c = (color0 && !v) ? 0 : rgba(rd16(pal + v * 2), 255); break; }
-            case 4: { int v = src[i]; c = (color0 && !v) ? 0 : rgba(rd16(pal + v * 2), 255); break; }
-            case 6: { u8 b = src[i]; int a = b >> 3; c = rgba(rd16(pal + (b & 7) * 2), (u8)(a << 3 | a >> 2)); break; }
-            case 7: { u16 v = rd16(src + i * 2); c = (v & 0x8000) ? rgba(v, 255) : 0; break; }
-            default: c = 0xFFFFFFFF;
+    // the palette (or, for the 8-bit formats with alpha, every byte value) to texels, once
+    static u32 lut32[256];
+    static u16 lut16[256];
+    int nlut = fmt == 2 ? 4 : fmt == 3 ? 16 : 256;
+    for (int v = 0; fmt != 7 && v < nlut; v++) {
+        if (fmt == 1) { int a = v >> 5; lut32[v] = rgba(rd16(pal + (v & 31) * 2), (u8)((a << 5) | (a << 2) | (a >> 1))); }
+        else if (fmt == 6) { int a = v >> 3; lut32[v] = rgba(rd16(pal + (v & 7) * 2), (u8)(a << 3 | a >> 2)); }
+        else lut16[v] = (color0 && !v) ? 0 : sColor[rd16(pal + v * 2) & 0x7FFF];
+    }
+    for (int ty = r0; ty < r1; ty++) {
+        for (int tx = c0; tx < c1; tx++) {
+            u32 base = TILE(tx, ty);
+            for (int y = 0; y < 8; y++) {
+                const u8 *m = sMorton + (7 - y) * 8;
+                u32 i0 = (u32)(ty * 8 + y) * w + tx * 8;  // (first texel of this tile row)
+                switch (fmt) {
+                case 1: case 6: { const u8 *s8 = src + i0; u32 *o = (u32 *)out + base; for (int x = 0; x < 8; x++) o[m[x]] = lut32[s8[x]]; break; }
+                case 4: { const u8 *s8 = src + i0; u16 *o = (u16 *)out + base; for (int x = 0; x < 8; x++) o[m[x]] = lut16[s8[x]]; break; }
+                case 3: { const u8 *s4 = src + (i0 >> 1); u16 *o = (u16 *)out + base;
+                          for (int x = 0; x < 8; x += 2) { u8 b = s4[x >> 1]; o[m[x]] = lut16[b & 15]; o[m[x + 1]] = lut16[b >> 4]; } break; }
+                case 2: { const u8 *s2 = src + (i0 >> 2); u16 *o = (u16 *)out + base;
+                          for (int x = 0; x < 8; x++) o[m[x]] = lut16[(s2[x >> 2] >> ((x & 3) * 2)) & 3]; break; }
+                case 7: { const u8 *s16 = src + i0 * 2; u16 *o = (u16 *)out + base;
+                          for (int x = 0; x < 8; x++) { u16 v = rd16(s16 + x * 2); o[m[x]] = (v & 0x8000) ? sColor[v & 0x7FFF] : 0; } break; }
+                }
             }
-            *tex32_px(out, w, h, x, y) = c;
         }
     }
+    #undef TILE
 }
 
-static C3D_Tex *texture_for(u32 teximage, u32 pltt) {
+// The texture for a polygon, decoded at least over texels [s0, s1) x [t0, t1) (in texels).
+static C3D_Tex *texture_for_(u32 teximage, u32 pltt, int s0, int s1, int t0, int t1);
+static C3D_Tex *texture_for(u32 teximage, u32 pltt, int s0, int s1, int t0, int t1) {
+    u64 t = svcGetSystemTick();
+    C3D_Tex *r = texture_for_(teximage, pltt, s0, s1, t0, t1);
+    gProf3dTex += svcGetSystemTick() - t;
+    return r;
+}
+static C3D_Tex *texture_for_(u32 teximage, u32 pltt, int s0, int s1, int t0, int t1) {
     int fmt = (teximage >> 26) & 7;
     if (!fmt) return NULL;
     int w = 8 << ((teximage >> 20) & 7), h = 8 << ((teximage >> 23) & 7);
     u32 key = teximage & 0x3FFFFFFF & ~(0xFu << 16);  // (address, size, format, colour 0: not the wrap bits)
     u32 addr = (teximage & 0xFFFF) << 3;
+    // the tiles needed (a texel's margin either side)
+    int c0 = (s0 - 1) >> 3, c1 = (s1 + 8) >> 3, r0 = (t0 - 1) >> 3, r1 = (t1 + 8) >> 3;
+    if (c0 < 0) c0 = 0;
+    if (r0 < 0) r0 = 0;
+    if (c1 > w >> 3) c1 = w >> 3;
+    if (r1 > h >> 3) r1 = h >> 3;
+    if (fmt == 5) { r0 = c0 = 0; r1 = h >> 3; c1 = w >> 3; }
+    if (c0 >= c1 || r0 >= r1) { r0 = c0 = 0; r1 = h >> 3; c1 = w >> 3; }
     TexEntry *e = NULL, *lru = &sTexCache[0];
     for (int i = 0; i < TEX_CACHE; i++) {
         TexEntry *t = &sTexCache[i];
@@ -1150,37 +1249,54 @@ static C3D_Tex *texture_for(u32 teximage, u32 pltt) {
     }
     if (!e) {
         e = lru;
-        if (e->tex.data && (e->w != w || e->h != h)) { C3D_TexDelete(&e->tex); e->tex.data = NULL; }
+        if (e->tex.data && (e->w != w || e->h != h || tex_wide(e->fmt) != tex_wide(fmt))) { C3D_TexDelete(&e->tex); e->tex.data = NULL; }
         if (!e->tex.data) {
-            if (!C3D_TexInit(&e->tex, (u16)w, (u16)h, GPU_RGBA8)) return NULL;
+            if (!C3D_TexInit(&e->tex, (u16)w, (u16)h, tex_wide(fmt) ? GPU_RGBA8 : GPU_RGBA5551)) return NULL;
             C3D_TexSetFilter(&e->tex, GPU_NEAREST, GPU_NEAREST);
         }
-        e->key = key; e->pltt = pltt; e->w = w; e->h = h; e->hash = 0; e->hashFrame = 0;
+        e->key = key; e->pltt = pltt; e->w = w; e->h = h; e->fmt = fmt; e->hash = 0; e->hashFrame = 0;
+        e->r0 = e->r1 = e->c0 = e->c1 = 0;
     }
     e->used = sFrameNo;
-    if (e->hashFrame != sFrameNo) {
-        extern uint32_t port_trace3d;
-        if (port_trace3d && port_frame_count == port_trace3d) {
-            const u8 *src = tex_ptr(addr), *pal = pal_ptr(fmt == 2 ? pltt << 3 : pltt << 4);
-            u32 nz = 0, bytes = tex_bytes(fmt, w, h);
-            if (src) for (u32 i = 0; i < bytes; i++) nz += src[i] != 0;
-            port_log("  tex %08lX pltt %04lX: fmt %d %dx%d addr %05lX src %p (%lu/%lu nonzero) pal %p [%04X %04X]\n", (unsigned long)teximage, (unsigned long)pltt,
-                 fmt, w, h, (unsigned long)addr, (const void *)src, (unsigned long)nz, (unsigned long)bytes, (const void *)pal, pal ? rd16(pal) : 0, pal ? rd16(pal + 2) : 0);
-        }
-  // (the data can change any frame: hashed once a frame)
-        e->hashFrame = sFrameNo;
-        u32 hsh = 2166136261u;
-        const u8 *src = tex_ptr(addr);
-        if (src) hsh = hash_bytes(hsh, src, tex_bytes(fmt, w, h) & ~3u);
-        const u8 *pal = pal_ptr(fmt == 2 ? pltt << 3 : pltt << 4);
-        if (pal && pal_bytes(fmt)) hsh = hash_bytes(hsh, pal, pal_bytes(fmt));
-        if (hsh != e->hash || !e->hash) {
-            e->hash = hsh | 1;
-            decode_texture(e->tex.data, w, h, fmt, (teximage >> 29) & 1, addr, pltt);
-            C3D_TexFlush(&e->tex);
-        }
+    int have = e->r0 < e->r1 && r0 >= e->r0 && r1 <= e->r1 && c0 >= e->c0 && c1 <= e->c1;
+    if (e->hashFrame == sFrameNo && have) return &e->tex;
+    // the region to keep decoded: what was, and what's asked for now
+    if (e->r0 < e->r1) {
+        if (e->r0 < r0) r0 = e->r0;
+        if (e->r1 > r1) r1 = e->r1;
+        if (e->c0 < c0) c0 = e->c0;
+        if (e->c1 > c1) c1 = e->c1;
+    }
+    // (the data can change any frame: its rows and the palette hashed once a frame)
+    u32 hsh = 2166136261u;
+    const u8 *src = tex_ptr(addr);
+    if (src) {
+        u32 rowb = tex_bytes(fmt, w, 8);  // (8 texel rows)
+        if (fmt == 5) hsh = hash_bytes(hsh, src, tex_bytes(fmt, w, h) & ~3u);
+        else hsh = hash_bytes(hsh, src + r0 * rowb, ((r1 - r0) * rowb) & ~3u);
+    }
+    const u8 *pal = pal_ptr(fmt == 2 ? pltt << 3 : pltt << 4);
+    if (pal && pal_bytes(fmt)) hsh = hash_bytes(hsh, pal, pal_bytes(fmt));
+    hsh |= 1;
+    int same = hsh == e->hash && r0 == e->r0 && r1 == e->r1 && c0 == e->c0 && c1 == e->c1;
+    e->hashFrame = sFrameNo;
+    if (!same) {
+        e->hash = hsh;
+        e->r0 = r0; e->r1 = r1; e->c0 = c0; e->c1 = c1;
+        decode_texture(e->tex.data, w, h, fmt, (teximage >> 29) & 1, addr, pltt, r0, r1, c0, c1);
+        C3D_TexFlush(&e->tex);
     }
     return &e->tex;
+}
+
+// A polygon's texture-coordinate bounds (texels, from the geometry engine); beyond the texture
+// (repeating): all of it on that axis.
+static void poly_st_bounds(const G3Frame *f, const G3Poly *p, int *s0, int *s1, int *t0, int *t1) {
+    (void)f;
+    int w = 8 << ((p->teximage >> 20) & 7), h = 8 << ((p->teximage >> 23) & 7);
+    *s0 = (int)p->s0; *s1 = (int)p->s1 + 1; *t0 = (int)p->t0; *t1 = (int)p->t1 + 1;
+    if (p->s0 < 0 || p->s1 > w) { *s0 = 0; *s1 = w; }
+    if (p->t0 < 0 || p->t1 > h) { *t0 = 0; *t1 = h; }
 }
 
 static GPU_TEXTURE_WRAP_PARAM wrap_of(int repeat, int flip) {
@@ -1189,12 +1305,17 @@ static GPU_TEXTURE_WRAP_PARAM wrap_of(int repeat, int flip) {
 
 // ---------------------------------------------------------------- drawing a frame
 static float sClipX = 1.0f, sClipY = 1.0f;  // clip-space scale (widening)
-static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
+static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
     for (u32 i = 0; i < f->np; i++) {
         const G3Poly *p = &f->p[i];
         if (p->translucent != translucent) continue;
         int fmt = (p->teximage >> 26) & 7;
-        C3D_Tex *tex = (fmt && (disp3d & 1)) ? texture_for(p->teximage, p->pltt) : NULL;
+        C3D_Tex *tex = NULL;
+        if (fmt && (disp3d & 1)) {
+            int s0, s1, t0, t1;
+            poly_st_bounds(f, p, &s0, &s1, &t0, &t1);
+            tex = texture_for(p->teximage, p->pltt, s0, s1, t0, t1);
+        }
         int mode = (p->polyattr >> 4) & 3;
         C3D_TexEnv *env = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env);
@@ -1223,17 +1344,8 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
         else blend_off();
         int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
         C3D_AlphaTest(true, GPU_GREATER, aref);
-        if (*nv + (int)p->count > MAX_V3) return;
-        float sw = tex ? 1.0f / tex->width : 0, sh = tex ? 1.0f / tex->height : 0;
-        for (u32 k = 0; k < p->count; k++) {
-            const G3Vtx *v = &f->v[p->first + k];
-            V3 *o = &sVbo3d[*nv + k];
-            // DS clip z/w in -1..1 (near -1) to the PICA's -w..0, near at -w (depth = -z/w: nearer is larger)
-            *o = (V3){ v->x * sClipX, -v->y * sClipY, (v->z - v->w) * 0.5f, v->w, v->r / 255.0f, v->g / 255.0f, v->b / 255.0f, v->a / 255.0f,
-                       v->s * sw, v->t * sh };
-        }
-        C3D_DrawArrays(GPU_TRIANGLES, *nv, (int)p->count);
-        *nv += (int)p->count;
+        if (tex) C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTc, 1.0f / tex->width, 1.0f / tex->height, 0, 0);
+        C3D_DrawArrays(GPU_TRIANGLES, (int)p->first, (int)p->count);
     }
 }
 
@@ -1242,28 +1354,24 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d, int *nv) {
 // neighbours has a different polygon ID and is farther away (the clear plane counts, with the
 // clear polygon ID). First the IDs: the opaque polygons again (nearest wins, its own depth
 // buffer), with the texture's alpha test.
-static void draw_ids(const G3Frame *f, u32 disp3d, int *nv, int translucent) {
+static void draw_ids(const G3Frame *f, u32 disp3d, int translucent) {
     // (depth goes in 8 bits: spread over this frame's own range of opaque depths)
-    float zmin = 1, zmax = -1;
-    for (u32 i = 0; i < f->np; i++) {
-        const G3Poly *p = &f->p[i];
-        if (p->translucent) continue;
-        for (u32 k = 0; k < p->count; k++) {
-            const G3Vtx *v = &f->v[p->first + k];
-            if (v->w <= 0) continue;
-            float z = v->z / v->w;
-            if (z < zmin) zmin = z;
-            if (z > zmax) zmax = z;
-        }
-    }
+    float zmin = f->zn0 / f->zd0, zmax = f->zn1 / f->zd1;
     if (zmin < -1) zmin = -1;
     if (zmax > 1) zmax = 1;
     float zscale = zmax > zmin ? 0.996f / (zmax - zmin) : 0;
+    // (depth = 0.004 + (zmax - z/w) * zscale = A + B * z/w; translucent: 0, never an edge)
+    float A = translucent ? 0 : 0.004f + zmax * zscale, B = translucent ? 0 : -zscale;
     for (u32 i = 0; i < f->np; i++) {
         const G3Poly *p = &f->p[i];
         if (p->translucent != translucent) continue;
         int fmt = (p->teximage >> 26) & 7;
-        C3D_Tex *tex = (fmt && (disp3d & 1)) ? texture_for(p->teximage, p->pltt) : NULL;
+        C3D_Tex *tex = NULL;
+        if (fmt && (disp3d & 1)) {
+            int s0, s1, t0, t1;
+            poly_st_bounds(f, p, &s0, &s1, &t0, &t1);
+            tex = texture_for(p->teximage, p->pltt, s0, s1, t0, t1);
+        }
         C3D_TexEnv *env = C3D_GetTexEnv(0);
         C3D_TexEnvInit(env);
         C3D_TexEnvSrc(env, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
@@ -1278,19 +1386,10 @@ static void draw_ids(const G3Frame *f, u32 disp3d, int *nv, int translucent) {
         C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
         int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
         C3D_AlphaTest(true, GPU_GREATER, aref);
-        if (*nv + (int)p->count > MAX_V3) return;
         float id = (float)(((p->polyattr >> 24) & 63) * 4) / 255.0f;  // (translucent: only G = 0 is written)
-        float sw = tex ? 1.0f / tex->width : 0, sh = tex ? 1.0f / tex->height : 0;
-        for (u32 k = 0; k < p->count; k++) {
-            const G3Vtx *v = &f->v[p->first + k];
-            V3 *o = &sVbo3d[*nv + k];
-            float d = v->w > 0 && !translucent ? 0.004f + (zmax - v->z / v->w) * zscale : 0;  // (nearer: larger; 0: never an edge)
-            if (d < 0) d = 0;
-            if (d > 1) d = 1;
-            *o = (V3){ v->x * sClipX, -v->y * sClipY, (v->z - v->w) * 0.5f, v->w, id, d, 0, 1, v->s * sw, v->t * sh };
-        }
-        C3D_DrawArrays(GPU_TRIANGLES, *nv, (int)p->count);
-        *nv += (int)p->count;
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocIdp, id, A, B, 0);
+        if (tex) C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTcId, 1.0f / tex->width, 1.0f / tex->height, 0, 0);
+        C3D_DrawArrays(GPU_TRIANGLES, (int)p->first, (int)p->count);
     }
 }
 
@@ -1388,9 +1487,14 @@ static int want_wide(const G3Frame *f, int screenW) {
     u32 dispcnt = rd32(DS(0x04000000));
     if (!(dispcnt & 8) || !(dispcnt & 0x100)) return 0;
     if (port_wide_mode == 2) return 1;
-    // (corners in clip space, y up, a few pixels in)
+    // (corners in clip space, y up, a few pixels in; one corner a frame, the last result of each kept)
+    static const float cx[4] = { -1, 1, -1, 1 }, cy[4] = { 1, 1, -1, -1 };
+    static u8 hit[4];
+    static int next;
     const float ix = 1 - 4 / 128.0f, iy = 1 - 4 / 96.0f;
-    return covers(f, -ix, iy) && covers(f, ix, iy) && covers(f, -ix, -iy) && covers(f, ix, -iy);
+    hit[next] = (u8)covers(f, cx[next] * ix, cy[next] * iy);
+    next = (next + 1) & 3;
+    return hit[0] && hit[1] && hit[2] && hit[3];
 }
 
 static int wide_stable(int want) {
@@ -1405,7 +1509,7 @@ static void render3d(int screenW) {
     layout(screenW);
     sWide = 0;
     if (!f || !s3dReady) return;
-    sWide = wide_stable(want_wide(f, screenW));
+    { u64 t = svcGetSystemTick(); sWide = wide_stable(want_wide(f, screenW)); gProf3dWide += svcGetSystemTick() - t; }
     port_g3_wide = sWide ? sW / 256.0f : 1.0f;
     port_g3_wide_y = sWide ? sH / 192.0f : 1.0f;
     sFrameNo++;
@@ -1415,8 +1519,9 @@ static void render3d(int screenW) {
     u32 cc = rgba((u16)(clear & 0x7FFF), (u8)(ca << 3 | ca >> 2));
     C3D_RenderTargetClear(s3dTarget, C3D_CLEAR_ALL, cc, 0);
     C3D_FrameDrawOn(s3dTarget);
+    GSPGPU_FlushDataCache(f->v, f->nv * sizeof(G3Vtx));  // (written by the CPU; read by the GPU)
     C3D_BindProgram(&sProg3d);
-    attrs_3d();
+    attrs_3d(f);
     // the DS viewport (x1, y1 from the bottom, x2, y2) on the 256x192 picture. (Measured with a test
     // square: the render target's viewport y counts from the picture's top, and its y axis points
     // down, so vertices go in with y negated.)
@@ -1428,11 +1533,11 @@ static void render3d(int screenW) {
     // (C3D_FrameDrawOn resets the viewport to the whole target: set again after each switch)
     const u32 vpx = (u32)(vx + 0.5f), vpy = (u32)(vy + 0.5f), vpw = (u32)(vw + 0.5f), vph = (u32)(vh + 0.5f);
     C3D_SetViewport(vpx, vpy, vpw, vph);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);  // (y flipped: see above)
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     C3D_CullFace(GPU_CULL_NONE);
-    int nv = 0;
-    draw_polys(f, 0, disp3d, &nv);
+    draw_polys(f, 0, disp3d);
     if ((disp3d & 0x20) && sIdTarget && port_edge_mode) {
         // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
         // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
@@ -1441,32 +1546,22 @@ static void render3d(int screenW) {
         C3D_FrameDrawOn(sIdTarget);
         C3D_SetViewport(vpx, vpy, vpw, vph);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
-        draw_ids(f, disp3d, &nv, 0);
+        u64 tid = svcGetSystemTick();
+        C3D_BindProgram(&sProgId);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
+        draw_ids(f, disp3d, 0);
         // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
-        draw_ids(f, disp3d, &nv, 1);
+        draw_ids(f, disp3d, 1);
+        gProf3dIds += svcGetSystemTick() - tid;
         C3D_FrameDrawOn(s3dTarget);
         draw_edges();
         C3D_BindProgram(&sProg3d);
-        attrs_3d();
+        attrs_3d(f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
         C3D_SetViewport(vpx, vpy, vpw, vph);
     }
-    draw_polys(f, 1, disp3d, &nv);
-    extern u32 port_test3d;
-    if (port_test3d) {  // (orientation check: a red square in the DS picture's top-left quarter)
-        C3D_TexEnv *env = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
-        C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
-        C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
-        C3D_AlphaTest(false, GPU_ALWAYS, 0);
-        blend_off();
-        C3D_SetViewport((u32)(-sL * sScale), (u32)(-sT * sScale), (u32)(256 * sScale), (u32)(192 * sScale));
-        static const float q[6][2] = { { -1, 0 }, { 0, 0 }, { -1, 1 }, { 0, 0 }, { 0, 1 }, { -1, 1 } };
-        for (int k = 0; k < 6; k++) sVbo3d[nv + k] = (V3){ q[k][0], -q[k][1], -0.5f, 1, 1, 0, 0, 1, 0, 0 };
-        C3D_DrawArrays(GPU_TRIANGLES, nv, 6);
-        nv += 6;
-    }
+    draw_polys(f, 1, disp3d);
     s3dHave = 1;
     // back to the 2D compositor's state
     C3D_BindProgram(&sProg);

@@ -44,11 +44,11 @@ def compile_runtime():
     out = f"{B}/obj/port"
     os.makedirs(out, exist_ok=True)
     # the GPU compositor's vertex shader, assembled and embedded
-    for sh in ("quad", "poly", "edge"):
+    for sh in ("quad", "poly", "polyid", "edge"):
         run(["/opt/devkitpro/tools/bin/picasso", "-o", f"{B}/gen/{sh}.shbin", f"{ROOT}/port/shaders/{sh}.v.pica"])
         with open(f"{B}/gen/{sh}_shbin.s", "w") as f:
             run(["/opt/devkitpro/tools/bin/bin2s", f"{B}/gen/{sh}.shbin"], stdout=f)
-    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s"]
+    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s", f"{B}/gen/polyid_shbin.s"]
     objs = []
     for s in srcs:
         o = f"{out}/{os.path.basename(s)}.o"
@@ -83,7 +83,7 @@ def archives():
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
-           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail",
+           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx",
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]
     return subprocess.run(cmd, capture_output=True, text=True), elf
