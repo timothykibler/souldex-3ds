@@ -95,3 +95,9 @@ build and do nothing.
 | OS (frame sync, ticks, alarms, locks), card/ROM/save, overlays, MI, divider, clock, input | `port/runtime/` |
 | Overlays all resident; "loading" one resets its data and runs its initialisers | `port/gen_ld.py` |
 | Wi-Fi, wireless, GBA slot: stubs (generated at link time) | `build-3ds/gen/stubs_auto.c` |
+
+## License
+
+The port's own code is under the MIT License; the decompilation it builds on, and the game itself,
+are not covered. Unofficial fan project, not affiliated with Nintendo, Game Freak, Creatures Inc. or
+The Pokémon Company. See [LICENSE](LICENSE).
