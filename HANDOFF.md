@@ -11,7 +11,7 @@ the build; this file is the state of play and how to pick it up.
 | Phase | State |
 |---|---|
 | 0: boots | Done. Existing saves load (the main menu's Continue); wild battles work. |
-| 1: 2D | Done. Pixel-identical to the software reference renderer (`scale1` mode). Shown at 1.25x, filling each screen's height (as fulldex does), composed at 2x and box-filtered down so pixels stay even. |
+| 1: 2D | Done. Pixel-identical to the software reference renderer (`scale1` mode). Shown 1:1 by default; a menu setting fills the screens' height at 1.25x (composed at 2x and box-filtered down), with optional side fill. |
 | 2: 3D | Works in the intro, overworld and battles: geometry engine + PICA renderer, edge marking, top screen widened to 400x240 when the 3D covers the DS frame (overworld). |
 | 3: sound | Not started. Sound commands are acknowledged instantly (`PXI_SendWordByFifo` in `devices.c`). |
 | Speed | Azahar (whose ticks are, as far as known, original-3DS speed): battle 59 fps; overworld ~30 fps, CPU-bound (game code ~16 ms incl. the geometry engine ~6 ms, frame building ~6 ms). Not yet measured on hardware. |

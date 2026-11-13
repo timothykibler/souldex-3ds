@@ -41,21 +41,27 @@ static Vtx *sVbo;
 static int sVtxUsed;
 static float sOX, sOY;  // (offset added to every quad: 0, the projection places the DS picture)
 
-// Screen layout. The DS picture fills each screen's height: 1.25x (256x192 -> 320x240), the
-// bottom screen exactly, the top screen with 40 pixels either side. On the top screen the 3D
-// layer can be widened to fill all of it (400x240): the DS frustum is extended sideways (clip x
-// scaled by 320/400), so what's inside the DS frame lands exactly where it would, at the same
-// scale as the 2D, and the sides show more of the scene. The 3D is drawn at the screen's own
-// resolution. The screens are composed at twice their size (SS) and halved by the display
-// transfer (a 2x2 box filter): the 2D, drawn at 2.5x with sharp pixels, ends up at 1.25x with
-// pixels of even size (slightly soft edges) instead of nearest scaling's 2-1-2-1 columns.
-// (debug.txt "scale1": the DS picture 1:1, exact, for the comparison with the software renderer.)
+// Screen layout, two ways (the player's choice, in the ZL+ZR menu: settings.txt):
+// - 1:1 (default): the DS picture's exact pixels in the middle of each screen, black around.
+// - fill: the DS picture fills each screen's height, 1.25x (256x192 -> 320x240). 1.25 isn't a
+//   whole number, so no fill can keep pixels exact: the screens are composed at twice their
+//   size (sSS) and halved by the display transfer (a 2x2 box filter), so the 2D, drawn at 2.5x,
+//   ends up at 1.25x with even pixels and slightly soft edges. Optionally the top screen's
+//   sides continue the picture's edge columns (side fill) instead of black.
+// Either way, on the top screen the overworld's 3D can be widened to fill all of it (400x240):
+// the DS frustum is extended (clip x and y scaled by the DS picture's share of the screen), so
+// what's inside the DS frame lands exactly where it would, at the same scale as the 2D, and the
+// rest shows more of the scene; the 3D is drawn at the screen's own resolution.
+// (debug.txt "scale1": 1:1 whatever the setting, for the comparison with the software renderer.)
 int port_wide_mode = 1;    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
 int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)
 int port_scale1;
+int port_display_fill;     // 1.25x fill (else 1:1)
+int port_side_fill;        // in fill mode, the top screen's sides continue the picture
+int port_display_scaled(void) { return port_display_fill && !port_scale1; }
 float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
 static float sScale = 1.25f;
-#define SS 2  // (composition supersampling)
+static int sSS = 1;  // composition supersampling: 2 in fill mode, 1 (exact) in 1:1 mode
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
 static int sWide;             // this frame's 3D layer is widened
@@ -786,14 +792,14 @@ static void flat(u32 abgr, int x0, int y0, int x1, int y1) {
 // The scissor box around the DS picture (or the whole screen), in the screen target's own
 // (rotated) coordinates.
 static void scissor_ds(int whole) {
-    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240 * SS, (u32)sScrW * SS); return; }
-    int x0 = (int)(-sL * sScale * SS + 0.5f), y0 = (int)(-sT * sScale * SS + 0.5f);
-    int w = (int)(256 * sScale * SS + 0.5f), h = (int)(192 * sScale * SS + 0.5f);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 * SS - (y0 + h)), (u32)x0, (u32)(240 * SS - y0), (u32)(x0 + w));
+    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240 * sSS, (u32)sScrW * sSS); return; }
+    int x0 = (int)(-sL * sScale * sSS + 0.5f), y0 = (int)(-sT * sScale * sSS + 0.5f);
+    int w = (int)(256 * sScale * sSS + 0.5f), h = (int)(192 * sScale * sSS + 0.5f);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 * sSS - (y0 + h)), (u32)x0, (u32)(240 * sSS - y0), (u32)(x0 + w));
 }
 
 static void layout(int screenW) {
-    sScale = port_scale1 ? 1.0f : 1.25f;
+    sScale = port_display_scaled() ? 1.25f : 1.0f;
     sScrW = screenW;
     sW = screenW / sScale; sH = 240 / sScale;
     sL = -(sW - 256) / 2; sT = -(sH - 192) / 2;
@@ -809,7 +815,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
     sOX = sOY = 0;
     int wide3d = e->main && sWide;
-    sMargins = screenW == 400 && !wide3d && sScale > 1.0f;  // (the top screen's sides, when the 3D doesn't fill them)
+    sMargins = screenW == 400 && !wide3d && sScale > 1.0f && port_side_fill;  // (the top screen's sides, when the 3D doesn't fill them)
     scissor_ds(0);
     C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);  // (on: the depth-stencil buffer is only written with it)
     C3D_CullFace(GPU_CULL_NONE);
@@ -924,11 +930,26 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
 // ---------------------------------------------------------------- frames
 static bool sReady;
 
-// The display transfer from a composed screen to its framebuffer: halved (2x2 box filter).
+// The display transfer from a composed screen to its framebuffer: halved (2x2 box filter) when
+// it was composed at twice the size.
 static u32 screen_transfer(void) {
     return GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-           GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY);
+           GX_TRANSFER_SCALING(sSS == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO);
+}
+
+// The screens' render targets at a supersampling factor (made again when the display mode
+// changes: VRAM holds one size at a time).
+static bool make_targets(int ss) {
+    if (sTop) C3D_RenderTargetDelete(sTop);
+    if (sBottom) C3D_RenderTargetDelete(sBottom);
+    sSS = ss;
+    sTop = C3D_RenderTargetCreate(240 * ss, 400 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    sBottom = C3D_RenderTargetCreate(240 * ss, 320 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    if (!sTop || !sBottom) { port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree()); return false; }
+    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
+    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
+    return true;
 }
 
 bool port_gpu2d_init(void) {
@@ -954,11 +975,7 @@ bool port_gpu2d_init(void) {
     // (the screens at twice their size, 24-bit colour: 16-bit rounds each blend step, and layered
     // blends drift from the DS's. Each has its own depth-stencil buffer: citro3d clears every
     // buffer at the frame's start, so a shared one would reach the second screen used.)
-    sTop = C3D_RenderTargetCreate(240 * SS, 400 * SS, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
-    sBottom = C3D_RenderTargetCreate(240 * SS, 320 * SS, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
-    if (!sTop || !sBottom) { port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree()); return false; }
-    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
-    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
+    if (!make_targets(2)) return false;  // (the larger size first: the 3D layer's targets come after)
     if (!init3d()) port_log("gpu: no 3D layer\n");
     if (C3D_TexInit(&sShade, 64, 8, GPU_RGBA4)) {  // (black, alpha 0 -> about 60 % across)
         C3D_TexSetFilter(&sShade, GPU_LINEAR, GPU_LINEAR);
@@ -996,6 +1013,13 @@ u32 gGpu2dRebuilds;   // BG textures rebuilt
 
 void port_gpu2d_frame(void) {
     if (!sReady) return;
+    if ((port_display_scaled() ? 2 : 1) != sSS) {  // (the display mode changed: targets of the other size)
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);  // (the GPU done with the old ones)
+        C3D_FrameEnd(0);
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C3D_FrameEnd(0);
+        make_targets(port_display_scaled() ? 2 : 1);
+    }
     u64 tw = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     u64 t0 = svcGetSystemTick();

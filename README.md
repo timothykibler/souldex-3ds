@@ -35,11 +35,19 @@ Put your SoulSilver (US, IPGE) ROM at `sdmc:/3ds/soulsilver-3ds/soulsilver.nds` 
 The bottom screen and `sdmc:/3ds/soulsilver-3ds/log.txt` show what it's doing. Saves go to
 `sdmc:/3ds/soulsilver-3ds/soulsilver.sav`, in the raw format TWiLight Menu++ uses.
 
+## Display
+
+The DS picture is shown with its exact pixels (1:1) in the middle of each screen; in the overworld
+the 3D world fills the whole top screen. In the **ZL+ZR** menu (also **L+R+SELECT**), *Screen*
+switches to *fill*: the picture fills each screen's height at 1.25x, which no exact scaling can
+(pixels stay even, edges slightly soft), and *Sides* chooses black sides or the picture's edges
+continued. The choice is kept in `settings.txt`.
+
 ## Cheats
 
 Put a `usrcheat.dat` (the R4 / TWiLight Menu++ format, e.g. DeadSkullzJr's database) at
 `sdmc:/3ds/soulsilver-3ds/usrcheat.dat` (or leave it in TWiLight's `sd:/_nds/TWiLightMenu/extras/`).
-In game, **ZL+ZR** (or **L+R+SELECT**) opens the cheat menu on the bottom screen: A opens a folder
+In game, **ZL+ZR** (or **L+R+SELECT**) opens the menu on the bottom screen: A opens a folder
 or turns a code on/off, B closes. Choices are kept in `cheats.txt`. Codes that change game data
 work (money, items, steps, Pokemon...); codes that patch the DS's machine code can't apply to this
 build and do nothing.

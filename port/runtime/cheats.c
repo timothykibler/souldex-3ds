@@ -9,7 +9,8 @@
 // fixed heap addresses, do nothing here instead of corrupting memory.
 //
 // Files (sdmc:/3ds/soulsilver-3ds/): usrcheat.dat (or TWiLight's sd:/_nds/TWiLightMenu/extras/
-// usrcheat.dat), cheats.txt (the names of the codes turned on). Menu: ZL+ZR, or L+R+SELECT.
+// usrcheat.dat), cheats.txt (the names of the codes turned on). Menu: ZL+ZR, or L+R+SELECT; it
+// also holds the display settings (settings.txt).
 #include <3ds.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,6 +154,27 @@ static int load_db(const char *path) {
     return 1;
 }
 
+// ---------------------------------------------------------------- display settings
+extern int port_display_fill, port_side_fill;
+static void save_settings(void) {
+    FILE *f = fopen(PORT_DIR "/settings.txt", "w");
+    if (!f) return;
+    fprintf(f, "screen %s\nsides %s\n", port_display_fill ? "fill" : "1:1", port_side_fill ? "continue" : "black");
+    fclose(f);
+}
+static void load_settings(void) {
+    FILE *f = fopen(PORT_DIR "/settings.txt", "r");
+    if (!f) return;
+    char line[64];
+    while (fgets(line, sizeof(line), f)) {
+        if (!strncmp(line, "screen fill", 11)) port_display_fill = 1;
+        else if (!strncmp(line, "screen 1:1", 10)) port_display_fill = 0;
+        else if (!strncmp(line, "sides continue", 14)) port_side_fill = 1;
+        else if (!strncmp(line, "sides black", 11)) port_side_fill = 0;
+    }
+    fclose(f);
+}
+
 static void save_choices(void) {
     FILE *f = fopen(PORT_DIR "/cheats.txt", "w");
     if (!f) return;
@@ -182,6 +204,7 @@ static void load_choices(void) {
 }
 
 void port_cheats_init(void) {
+    load_settings();
     if (!load_db(PORT_DIR "/usrcheat.dat") && !load_db("sdmc:/_nds/TWiLightMenu/extras/usrcheat.dat")) return;
     load_choices();
 }
@@ -291,9 +314,11 @@ typedef struct { int folder, cheat; } Row;
 static Row *sRows;
 static int sNumRows;
 
+#define NUM_SETTINGS 2
 static void build_rows(void) {
-    if (!sRows) sRows = malloc(sizeof(Row) * (size_t)(sNumCheats + sNumFolders + 1));
+    if (!sRows) sRows = malloc(sizeof(Row) * (size_t)(sNumCheats + sNumFolders + NUM_SETTINGS + 1));
     sNumRows = 0;
+    for (int i = 0; i < NUM_SETTINGS; i++) sRows[sNumRows++] = (Row){ -2, i };  // (the display settings)
     int lastFolder = -2;
     for (int i = 0; i < sNumCheats; i++) {
         int fo = sCheats[i].folder;
@@ -305,11 +330,16 @@ static void build_rows(void) {
 
 static void draw_menu(int cur, int top) {
     printf("\x1b[1;1H\x1b[2J");
-    printf("\x1b[36mCheats\x1b[0m  A: on/off, open  B: back\n");
-    printf("\x1b[90m%.38s\x1b[0m\n", sDbName);
+    printf("\x1b[36mSettings & cheats\x1b[0m  A: change  B: back\n");
+    printf("\x1b[90m%.38s\x1b[0m\n", sNumCheats ? sDbName : "(no usrcheat.dat: no cheats)");
     for (int r = top; r < sNumRows && r < top + 26; r++) {
         const Row *w = &sRows[r];
         const char *mark = r == cur ? "\x1b[33m>" : " ";
+        if (w->folder == -2) {
+            if (w->cheat == 0) printf("%s Screen: %s\x1b[0m\n", mark, port_display_fill ? "fill (1.25x, soft)" : "1:1 (exact pixels)");
+            else printf("%s Sides (fill): %s\x1b[0m\n", mark, port_side_fill ? "continue picture" : "black");
+            continue;
+        }
         if (w->cheat < 0) printf("%s%s %.34s\x1b[0m\n", mark, sFolders[w->folder].open ? "-" : "+", sFolders[w->folder].name);
         else printf("%s%s[%c] %.32s\x1b[0m\n", mark, w->folder >= 0 ? " " : "", sCheats[w->cheat].on ? 'x' : ' ', sCheats[w->cheat].name);
     }
@@ -341,7 +371,10 @@ static void menu(void) {
         if (down & KEY_LEFT) { cur -= 13; if (cur < 0) cur = 0; redraw = 1; }
         if ((down & KEY_A) && sNumRows) {
             Row w = sRows[cur];
-            if (w.cheat < 0) {
+            if (w.folder == -2) {
+                if (w.cheat == 0) port_display_fill ^= 1; else port_side_fill ^= 1;
+                save_settings();
+            } else if (w.cheat < 0) {
                 sFolders[w.folder].open ^= 1;
                 build_rows();
             } else {
@@ -372,7 +405,6 @@ static void menu(void) {
 
 // Once a frame (port_frame, after the input): the menu if asked for, then the codes.
 void port_cheats_frame(void) {
-    if (!sNumCheats) return;
     if (menu_keys(hidKeysHeld())) menu();
     run_cheats();
 }
