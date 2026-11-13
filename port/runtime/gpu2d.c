@@ -935,6 +935,21 @@ void port_gpu2d_dump_full(u32 frame) {
 
 // For debugging: an engine's display registers and visible sprites.
 void port_gpu2d_describe(int engine) {
+    {   // what each BG's map, tiles and palette hold (non-zero bytes)
+        Eng e = engine ? (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 }
+                       : (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
+        e.dispcnt = rd32(e.io);
+        u32 pz = 0;
+        for (int i = 0; i < 512; i++) pz += e.bgpal[i] != 0;
+        port_log("  engine %c BG palette: %lu/512 bytes non-zero\n", engine ? 'B' : 'A', (unsigned long)pz);
+        for (int bg = 0; bg < 4; bg++) {
+            u16 cnt = rd16(e.io + 8 + bg * 2);
+            u32 sb = screen_base(&e, cnt), cb = char_base(&e, cnt), mz = 0, cz = 0;
+            for (u32 i = 0; i < 0x1000; i++) mz += e.bgv[(sb + i) & (e.bgsize - 1)] != 0;
+            for (u32 i = 0; i < 0x8000; i++) cz += e.bgv[(cb + i) & (e.bgsize - 1)] != 0;
+            port_log("    BG%d: map @%05lX %lu/4096 non-zero, tiles @%05lX %lu/32768 non-zero\n", bg, (unsigned long)sb, (unsigned long)mz, (unsigned long)cb, (unsigned long)cz);
+        }
+    }
     const u8 *io = DS(engine ? 0x04001000 : 0x04000000);
     const u8 *oam = DS(engine ? 0x07000400 : 0x07000000);
     port_log("  engine %c: DISPCNT %08lX BG0-3CNT %04X %04X %04X %04X BLDCNT %04X BLDALPHA %04X BLDY %04X WIN %04X/%04X %04X/%04X IN %04X OUT %04X MB %04X\n",

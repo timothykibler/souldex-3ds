@@ -1,3 +1,31 @@
+diff --git a/src/battle/battle_system.c b/src/battle/battle_system.c
+index d0263ff..ec5f189 100644
+--- a/src/battle/battle_system.c
++++ b/src/battle/battle_system.c
+@@ -851,12 +851,12 @@ void BattleSystem_SetBackground(BattleSystem *battleSystem) {
+     battleSystem->unk220 = Heap_Alloc(HEAP_ID_BATTLE, 0x10000);
+     battleSystem->unk224 = Heap_Alloc(HEAP_ID_BATTLE, 0x200);
+ 
+-    MI_CpuCopy32((void *)0x6010000, (u32 *)battleSystem->unk220, 0x10000);
++    MI_CpuCopy32((void *)(HW_BG_VRAM + 0x10000), (u32 *)battleSystem->unk220, 0x10000);
+     dst = (u32 *)battleSystem->unk224;
+     src = (u32 *)PaletteData_GetUnfadedBuf(battleSystem->palette, PLTTBUF_MAIN_BG);
+     MI_CpuCopy32(src, dst, 0x200);
+ 
+-    vram = (u8 *)0x6400000;
++    vram = (u8 *)HW_OBJ_VRAM;
+     image = Sprite_GetImageProxy(battleSystem->unk17C[1].unk0->sprite);
+     vram += image->vramLocation.baseAddrOfVram[NNS_G2D_VRAM_TYPE_2DMAIN];
+ 
+@@ -883,7 +883,7 @@ void BattleSystem_SetBackground(BattleSystem *battleSystem) {
+         }
+     }
+ 
+-    vram = (u8 *)0x6400000;
++    vram = (u8 *)HW_OBJ_VRAM;
+     image = Sprite_GetImageProxy(battleSystem->unk17C[0].unk0->sprite);
+     vram += image->vramLocation.baseAddrOfVram[NNS_G2D_VRAM_TYPE_2DMAIN];
+ 
 diff --git a/src/berry_pots_app_tasks.c b/src/berry_pots_app_tasks.c
 index 22b06bd..fa74666 100644
 --- a/src/berry_pots_app_tasks.c
