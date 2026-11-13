@@ -1,7 +1,11 @@
 """HOME Menu art for the CIA, from the player's own ROM (nothing of the game is kept in the repo):
 the DS banner's 32x32 icon and English title.
 
-    python3 tools/cia_art.py <rom.nds> <out dir>
+    python3 tools/cia_art.py <rom.nds> <out dir> [--keyart image]
+
+With --keyart (your own 2:1 artwork, kept out of the repo): the banner is the image scaled to
+256x128 and the icon a square crop of it (--icon-box x0,y0,size in the image's pixels; the
+default suits the SoulSilver key art, Lugia on the right) scaled to 48x48.
 
 Writes icon.png (48x48: the icon at 1.5x, as 3x nearest then halved, so its pixels stay even),
 banner.png (256x128: the icon at 3x beside the title) and titles.txt (short title, long title,
@@ -10,7 +14,7 @@ publisher, one per line) for bannertool.
 import struct
 import sys
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
@@ -54,8 +58,33 @@ def gradient(w, h, top, bottom):
     return img
 
 
+def keyart(path, out, box):
+    """Banner and icon from the player's own artwork (any size; the banner wants 2:1)."""
+    im = Image.open(path).convert("RGB")
+    w, h = im.size
+    if w * 128 != h * 256:  # (centre-crop to 2:1)
+        if w * 128 > h * 256:
+            cw = h * 2
+            im = im.crop(((w - cw) // 2, 0, (w - cw) // 2 + cw, h))
+        else:
+            ch = w // 2
+            im = im.crop((0, (h - ch) // 2, w, (h - ch) // 2 + ch))
+        w, h = im.size
+    sharp = ImageFilter.UnsharpMask(radius=1, percent=60, threshold=2)
+    im.resize((256, 128), Image.LANCZOS).filter(sharp).save(f"{out}/banner.png")
+    x0, y0, size = box if box else (int(w * 0.5375), int(h * 0.05), int(h * 0.95))
+    size = min(size, w - x0, h - y0)
+    im.crop((x0, y0, x0 + size, y0 + size)).resize((48, 48), Image.LANCZOS).filter(sharp).save(f"{out}/icon.png")
+
+
 def main():
-    rom, out = sys.argv[1], sys.argv[2]
+    args = sys.argv[1:]
+    art = box = None
+    if "--keyart" in args:
+        i = args.index("--keyart"); art = args[i + 1]; del args[i:i + 2]
+    if "--icon-box" in args:
+        i = args.index("--icon-box"); box = tuple(int(v) for v in args[i + 1].split(",")); del args[i:i + 2]
+    rom, out = args[0], args[1]
     icon, lines = ds_banner(rom)
     name = lines[0] if lines else "Pokemon SoulSilver"
     maker = lines[-1] if len(lines) > 1 else ""
@@ -70,7 +99,6 @@ def main():
     d = ImageDraw.Draw(ban)
     shadow = Image.new("RGBA", (256, 128), (0, 0, 0, 0))  # (a soft shadow under the icon: it has its own frame)
     ImageDraw.Draw(shadow).rectangle([18, 22, 18 + 96, 22 + 96], fill=(30, 40, 70, 90))
-    from PIL import ImageFilter
     ban.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(4)))
     ban.alpha_composite(scaled(icon, 2), (14, 16))
     words = name.split(" ", 1)  # ("Pokémon", "SoulSilver")
@@ -83,6 +111,8 @@ def main():
     d.text((125, y + 6), maker, font=small, fill=(60, 70, 95, 255))
     ban.convert("RGB").save(f"{out}/banner.png")
 
+    if art:
+        keyart(art, out, box)  # (over the ROM-made banner and icon)
     with open(f"{out}/titles.txt", "w", encoding="utf-8") as f:
         f.write(f"{name}\n{name} (3DS port)\n{maker}\n" if maker else f"{name}\n{name} (3DS port)\npersonal build\n")
     print(f"cia_art: {name!r}")
