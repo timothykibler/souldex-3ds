@@ -3,13 +3,38 @@
 A native Nintendo 3DS build of Pokémon SoulSilver from the [pret/pokeheartgold](https://github.com/pret/pokeheartgold)
 decompilation: the game's code (its C, and the ~64% still in ARM/Thumb assembly, which the 3DS's
 ARM11 runs as it is) compiled with devkitARM GCC, on a runtime that stands in for the DS hardware
-and the parts of Nintendo's SDK that drove it. The game's files are read from your own ROM.
+and the parts of Nintendo's SDK that drove it. The game's files are read from your own ROM. It is
+not an emulator: the game runs as a 3DS program.
 
-It boots, loads saves, and plays the overworld and battles with the DS picture shown 1:1 (the
-overworld's 3D widened to fill the 400x240 top screen). No sound yet. See HANDOFF.md.
+## What it does
 
-Nothing of the game is in this repository. Builds contain code compiled from the decomp: keep them
-to yourself.
+- **Plays the game**: boots, loads your existing save (the TWiLight Menu++ `.sav` format), the
+  overworld, battles, menus.
+- **Graphics on the 3DS's GPU**: the DS's two 2D engines are composed by the GPU, pixel-identical
+  to a software reference renderer; the DS's 3D (geometry engine, textures, edge marking) is drawn
+  by the 3DS's PICA200.
+- **Widescreen**: the DS picture shown with exact pixels (1:1); in the overworld the 3D world is
+  widened to fill the 400x240 top screen. A menu setting fills the screens' height at 1.25x instead.
+- **Stereoscopic 3D**: with the 3D slider up, the overworld's 3D sits behind the screen and the
+  2D in front of it; switchable off in the menu.
+- **Sound**: the DS's own ARM7 sound driver runs on a second core, mixed into the 3DS's DSP.
+- **Cheats**: Action Replay codes from a `usrcheat.dat` (the TWiLight Menu++ database), in an
+  in-game menu.
+- **A CIA** with HOME Menu art made from your ROM (and, optionally, your own artwork: a layered,
+  transparent, stereoscopic banner).
+
+What's left is in [HANDOFF.md](HANDOFF.md) (speed on an original 3DS, a few 3D features, wipes in
+widened scenes, smaller gaps).
+
+## What's in this repository, and what isn't
+
+Nothing of the game: no ROM, no game data, graphics, music or text; screenshots and builds are
+git-ignored. You need your own SoulSilver ROM and save. The repository holds the port's own code,
+build scripts and a patch to the decomp. A few headers in `port/include` are modified copies of the
+decomp project's reconstructed SDK headers. No code was taken from other ports (e.g. pspoke, GPL).
+The cheat database, artwork and the 3DS's DSP firmware are yours to supply. Builds contain code
+compiled from the decomp and data read from your ROM at run time: keep them to yourself, don't
+distribute CIAs.
 
 ## Build
 
