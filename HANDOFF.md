@@ -13,7 +13,7 @@ the build; this file is the state of play and how to pick it up.
 | 0: boots | Done. Existing saves load (the main menu's Continue); wild battles work. |
 | 1: 2D | Done. Pixel-identical to the software reference renderer (`scale1` mode). Shown 1:1 by default; a menu setting fills the screens' height at 1.25x (composed at 2x and box-filtered down), with optional side fill. |
 | 2: 3D | Works in the intro, overworld and battles: geometry engine + PICA renderer, edge marking, top screen widened to 400x240 when the 3D covers the DS frame (overworld). |
-| 3: sound | Not started. Sound commands are acknowledged instantly (`PXI_SendWordByFifo` in `devices.c`). |
+| 3: sound | Working: the SDK's ARM7 driver (`libsnd_arm7`, symbols `a7_`-prefixed) runs on core 2, ticked every 5.2 ms of output; a 16-channel mixer (PCM8/16, ADPCM, PSG, noise) feeds NDSP at 32768 Hz (`port/runtime/snd.c`). Music, effects and cries verified in the intro, field and a battle. Not yet: sound alarms (used only by `NNS_SndStrm`, overlay 0) and capture/reverb (never started by the game). `debug.txt` `wavdump [F]` records 30 s to `sound.wav`. |
 | Speed | Azahar (whose ticks are, as far as known, original-3DS speed): battle 59 fps; overworld ~30 fps, CPU-bound (game code ~16 ms incl. the geometry engine ~6 ms, frame building ~6 ms). Not yet measured on hardware. |
 
 Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 like Metrowerks (`port/include/nitro/types.h`, saves and asm struct offsets); HW_BUTTON_XY_BUF layout (A/B never worked); WVR start-up and an emulated WM (`wm.c`); VBlank interrupt during card reads (field texture-load tasks overflowed the VBlank queue); literal DS VRAM addresses in `BattleSystem_SetBackground` (decomp patch); GPU vertex buffers flushed from the CPU cache (needed on hardware, invisible in Azahar).
@@ -33,8 +33,9 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    writes the save's money field. The menu (ZL+ZR / L+R+SELECT) is untested on hardware. Codes
    whose addresses fall in unnamed BSS gaps or overlay data don't translate (skipped); `cheatlog`
    in debug.txt logs every write and the value it replaced.
-6. **Phase 3, sound**: run the decomp's ARM7 sound driver (`libsnd_arm7`) on a second core, mix the
-   16 channels, output through NDSP.
+6. **Phase 3, sound** (working; see the table): left are sound alarms for `NNS_SndStrm` (overlay 0).
+   Lesson: the game asks for volume 128, one past `SNDi_DecibelTable`; the DS reads 0 there, so
+   `port/sdkfix.py` gives the table a trailing 0 (without it every channel ran at +229 dB).
 7. **Stereoscopic 3D** (wanted if it's simple and looks like current 3DS titles): draw the 3D
    layer once per eye with a depth-dependent horizontal shift (x_clip += eye * sep * (w - conv),
    from the slider: osGet3DSliderState), 2D layers at the screen plane; gfxSet3D and a right-eye
