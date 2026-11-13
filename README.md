@@ -6,6 +6,8 @@ ARM11 runs as it is) compiled with devkitARM GCC, on a runtime that stands in fo
 and the parts of Nintendo's SDK that drove it. The game's files are read from your own ROM. It is
 not an emulator: the game runs as a 3DS program.
 
+**New here? See [GETTING_STARTED.md](GETTING_STARTED.md)** to build, install and play.
+
 ## What it does
 
 - **Plays the game**: boots, loads your existing save (the TWiLight Menu++ `.sav` format), the
@@ -62,14 +64,15 @@ The bottom screen and `sdmc:/3ds/soulsilver-3ds/log.txt` show what it's doing. S
 
 ## Display
 
-The DS picture is shown with its exact pixels (1:1) in the middle of each screen; in the overworld
-the 3D world fills the whole top screen. In the **ZL+ZR** menu (also **L+R+SELECT**), *Screen*
-switches to *fill*: the picture fills each screen's height at 1.25x, which no exact scaling can
-(pixels stay even, edges slightly soft), and *Sides* chooses black sides or the picture's edges
-continued. The choice is kept in `settings.txt`.
+The top screen shows the DS picture with its exact pixels (1:1); in the overworld the 3D world fills
+the whole wide screen. In the **ZL+ZR** menu (also **L+R+SELECT**), *Top screen* switches to
+*fill*: the picture fills the screen's height at 1.25x, which no exact scaling can (pixels stay
+even, edges slightly soft), and *Sides* chooses black sides or the picture's edges continued. The
+bottom screen always fills (1.25x). The choices are kept in `settings.txt`.
 
 **Stereoscopic 3D** follows the 3D slider in 1:1 mode: the 2D layers sit at the screen, the 3D
-world goes into it (battles stay flat: their Pokémon stand on 2D platforms). It costs some CPU
+world goes into it (battles stay flat: their Pokémon stand on 2D platforms). While it's in use the
+bottom screen is drawn at 1x (still filling) to leave VRAM for the second eye. It costs some CPU
 time per frame; the menu's *3D* row turns it off entirely (also `3d off` in `settings.txt`, or
 build with `-DPORT_NO_STEREO` to start with it off).
 
