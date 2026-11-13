@@ -54,6 +54,8 @@ void port_vblank_irq_maybe(void) {
     OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
     if (vblank) { sInIrq = 1; vblank(); sInIrq = 0; }
     INTR_CHECK |= OS_IE_V_BLANK;
+    extern void port_snd_arm9_messages(void);
+    port_snd_arm9_messages();  // (sound alarms, as an interrupt would deliver them)
 }
 
 static u64 sGameTicks, sFrameEnter, sFrameExit;
@@ -98,6 +100,10 @@ void port_frame(void) {
     port_wm_frame();
     extern void port_cheats_frame(void);
     port_cheats_frame();
+    extern void port_snd_arm9_messages(void);
+    port_snd_arm9_messages();
+    extern void port_strmtest_frame(void);
+    port_strmtest_frame();
     run_alarms();
     // The game's VBlank handler (OS_SetIrqFunction(OS_IE_V_BLANK, ...)): it does the frame's
     // transfers and sets the interrupt check flag the main loop waits for.

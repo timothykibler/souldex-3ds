@@ -60,12 +60,72 @@ int port_a7_ReceiveMessage(void *q, void **msg, s32 flags) {
 // (the driver runs on one thread, its own: nothing to mask)
 int port_a7_DisableInterrupts(void) { return 0; }
 int port_a7_RestoreInterrupts(int s) { return s; }
-// (sound alarms, the ARM7 telling the ARM9 a timed event happened: not yet)
-void port_a7_CreateAlarm(void *a) { (void)a; }
-void port_a7_SetAlarm(void *a, u64 t, void *h, void *arg) { (void)a; (void)t; (void)h; (void)arg; }
-void port_a7_SetPeriodicAlarm(void *a, u64 s, u64 p, void *h, void *arg) { (void)a; (void)s; (void)p; (void)h; (void)arg; }
-void port_a7_CancelAlarm(void *a) { (void)a; }
-int port_a7_PXI_SendWordByFifo(int tag, u32 data, int err) { (void)tag; (void)data; (void)err; return 0; }
+// ---------------------------------------------------------------- sound alarms, and messages back
+// The driver's alarms (SND_SetupAlarm / SND_StartAlarm: what NNS_SndStrm refills its buffers by)
+// run in the output's time, like its tick, so they stay in step with the channels they belong to.
+// The driver's only OS alarms are these, and they fire on this thread; their handler sends a word
+// back over PXI, which goes into a second ring the game reads once a frame (port_frame).
+#define A7_TICK_PER_SAMPLE (33513982.0 / 64.0 / RATE_)
+#define RATE_ 32768
+static u64 sMixed;
+u64 port_a7_GetTick(void) { return (u64)((double)sMixed * A7_TICK_PER_SAMPLE); }
+typedef void (*A7AlarmHandler)(void *);
+static struct { void *alarm; u64 fire, period; A7AlarmHandler h; void *arg; int on; } sAlarm[8];
+static int alarm_slot(void *a) {
+    int free = -1;
+    for (int i = 0; i < 8; i++) {
+        if (sAlarm[i].alarm == a) return i;
+        if (free < 0 && !sAlarm[i].alarm) free = i;
+    }
+    if (free >= 0) sAlarm[free].alarm = a;
+    return free;
+}
+void port_a7_CreateAlarm(void *a) { int i = alarm_slot(a); if (i >= 0) sAlarm[i].on = 0; }
+void port_a7_SetAlarm(void *a, u64 t, void *h, void *arg) {
+    int i = alarm_slot(a);
+    if (i < 0) return;
+    sAlarm[i].fire = port_a7_GetTick() + t; sAlarm[i].period = 0; sAlarm[i].h = (A7AlarmHandler)h; sAlarm[i].arg = arg; sAlarm[i].on = 1;
+}
+void port_a7_SetPeriodicAlarm(void *a, u64 start, u64 period, void *h, void *arg) {
+    int i = alarm_slot(a);
+    if (i < 0) return;
+    sAlarm[i].fire = start; sAlarm[i].period = period; sAlarm[i].h = (A7AlarmHandler)h; sAlarm[i].arg = arg; sAlarm[i].on = 1;
+}
+void port_a7_CancelAlarm(void *a) { for (int i = 0; i < 8; i++) if (sAlarm[i].alarm == a) sAlarm[i].on = 0; }
+static u32 sAlarmsFired;
+static void run_a7_alarms(void) {
+    u64 now = port_a7_GetTick();
+    for (int i = 0; i < 8; i++)
+        while (sAlarm[i].on && sAlarm[i].fire <= now) {
+            sAlarm[i].on = sAlarm[i].period != 0;
+            sAlarm[i].fire += sAlarm[i].period;
+            sAlarmsFired++;
+            sAlarm[i].h(sAlarm[i].arg);
+            if (!sAlarm[i].period) break;
+        }
+}
+// ARM7 -> ARM9 words (sound tag): written here, read by the game's thread
+#define BACK 64
+static volatile u32 sBack[BACK];
+static volatile u32 sBackHead, sBackTail;
+int port_a7_PXI_SendWordByFifo(int tag, u32 data, int err) {
+    (void)tag; (void)err;
+    u32 h = sBackHead;
+    if (h - sBackTail >= BACK) return 0;  // (full, the game stalled for seconds: dropped rather than the handler spinning)
+    sBack[h % BACK] = data;
+    __sync_synchronize();
+    sBackHead = h + 1;
+    return 0;
+}
+void port_snd_arm9_messages(void) {
+    extern void (*port_pxi_sound_callback)(int, u32, int);
+    while (sBackTail != sBackHead) {
+        __sync_synchronize();
+        u32 d = sBack[sBackTail % BACK];
+        sBackTail = sBackTail + 1;
+        if (port_pxi_sound_callback) port_pxi_sound_callback(7 /* PXI_FIFO_TAG_SOUND */, d, 0);
+    }
+}
 void port_a7_PXI_SetFifoRecvCallback(int tag, void *cb) { (void)tag; (void)cb; }
 int port_a7_PMi_SetControl(u32 v) { (void)v; return 0; }
 int port_a7_PMi_ResetControl(u32 v) { (void)v; return 0; }
@@ -278,13 +338,13 @@ static s16 *sPcm;
 static LightEvent sEvent;
 static volatile int sRun;
 static double sNextTick;
-static u64 sMixed;
 
 static void fill(s16 *out, int frames) {
     // the driver ticks at its own times within the samples (sample-accurate)
     int done = 0;
     while (done < frames) {
         if (sMixed >= sNextTick) { driver_tick(); sTicks++; sNextTick += TICK_SAMPLES; }
+        run_a7_alarms();
         int n = frames - done;
         double until = sNextTick - (double)sMixed;
         if (until < n) n = (int)until + (until > (int)until);
@@ -317,6 +377,7 @@ static void fill(s16 *out, int frames) {
 void a7_SND_PortDiag(char *out, int cap);
 void port_snd_report(void) {
     { static char d[2048]; d[0] = 0; a7_SND_PortDiag(d, sizeof(d)); port_log("  sound state:%s\n", d); }
+    port_log("  sound: %lu alarms fired\n", (unsigned long)sAlarmsFired);
     port_log("  sound: %lu driver ticks, up to %lu channels, peak level %lu\n", (unsigned long)sTicks,
              (unsigned long)sPeakChannels, (unsigned long)sPeakLevel);
     port_log("  sound channels (format:peak/vol):");

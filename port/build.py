@@ -48,7 +48,7 @@ A7_EXTERN = {
     "OS_ReceiveMessage": "port_a7_ReceiveMessage", "OS_DisableInterrupts": "port_a7_DisableInterrupts",
     "OS_RestoreInterrupts": "port_a7_RestoreInterrupts", "OS_CreateAlarm": "port_a7_CreateAlarm",
     "OS_SetAlarm": "port_a7_SetAlarm", "OS_SetPeriodicAlarm": "port_a7_SetPeriodicAlarm",
-    "OS_CancelAlarm": "port_a7_CancelAlarm", "PXI_SendWordByFifo": "port_a7_PXI_SendWordByFifo",
+    "OS_CancelAlarm": "port_a7_CancelAlarm", "OS_GetTick": "port_a7_GetTick", "PXI_SendWordByFifo": "port_a7_PXI_SendWordByFifo",
     "PXI_SetFifoRecvCallback": "port_a7_PXI_SetFifoRecvCallback", "PMi_SetControl": "port_a7_PMi_SetControl",
     "PMi_ResetControl": "port_a7_PMi_ResetControl", "SDK_ASSERT": "port_a7_Assert",
     "SDK_MINMAX_ASSERT": "port_a7_MinMaxAssert", "SVC_ResetSoundBias": "port_a7_ResetSoundBias",

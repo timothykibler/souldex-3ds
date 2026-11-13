@@ -89,6 +89,7 @@ int main(void) {
                 extern int port_snd_wavdump;
                 port_snd_wavdump = sscanf(line, "wavdump %u", &n) == 1 ? (int)n + 1 : 1;
             }
+            else if (sscanf(line, "strmtest %u", &n) == 1) { extern int port_strmtest_frame_no; port_strmtest_frame_no = (int)n; }
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }

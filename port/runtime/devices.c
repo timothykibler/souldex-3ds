@@ -155,9 +155,11 @@ void TP_GetCalibratedPoint(TPData *disp, const TPData *raw) { *disp = *raw; }
 void TP_GetUnCalibratedPoint(u16 *raw_x, u16 *raw_y, u16 dx, u16 dy) { *raw_x = dx; *raw_y = dy; }
 
 // ---------------------------------------------------------------- PXI: the ARM7 link
-// The only ARM7 part the port has is the sound driver (snd.c): sound command lists go to it.
+// The only ARM7 part the port has is the sound driver (snd.c): sound command lists go to it, and
+// its messages back (sound alarms) reach the game's sound callback once a frame (port_frame).
+PXIFifoCallback port_pxi_sound_callback;
 void PXI_Init(void) {}
-void PXI_SetFifoRecvCallback(int fifotag, PXIFifoCallback callback) { (void)fifotag; (void)callback; }
+void PXI_SetFifoRecvCallback(int fifotag, PXIFifoCallback callback) { if (fifotag == PXI_FIFO_TAG_SOUND) port_pxi_sound_callback = callback; }
 BOOL PXI_IsCallbackReady(int fifotag, PXIProc proc) { (void)fifotag; (void)proc; return TRUE; }
 int PXI_SendWordByFifo(int fifotag, u32 data, BOOL err) {
     (void)err;
