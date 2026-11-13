@@ -338,7 +338,7 @@ static void draw_menu(int cur, int top) {
         const Row *w = &sRows[r];
         const char *mark = r == cur ? "\x1b[33m>" : " ";
         if (w->folder == -2) {
-            if (w->cheat == 0) printf("%s Screen: %s\x1b[0m\n", mark, port_display_fill ? "fill (1.25x, soft)" : "1:1 (exact pixels)");
+            if (w->cheat == 0) printf("%s Top screen: %s\x1b[0m\n", mark, port_display_fill ? "fill (1.25x, soft)" : "1:1 (exact pixels)");
             else if (w->cheat == 1) printf("%s Sides (fill): %s\x1b[0m\n", mark, port_side_fill ? "continue picture" : "black");
             else printf("%s 3D (slider, 1:1): %s\x1b[0m\n", mark, port_stereo_enabled ? "on" : "off (faster)");
             continue;

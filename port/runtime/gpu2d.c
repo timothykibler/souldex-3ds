@@ -62,10 +62,13 @@ int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)
 int port_scale1;
 int port_display_fill;     // 1.25x fill (else 1:1)
 int port_side_fill;        // in fill mode, the top screen's sides continue the picture
-int port_display_scaled(void) { return port_display_fill && !port_scale1; }
+int port_display_scaled(void) { return port_display_fill && !port_scale1; }  // (the top screen)
+int port_bottom_scaled(void) { return !port_scale1; }  // (the bottom screen always fills: its menus have nothing beyond their edges)
 float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
 static float sScale = 1.25f;
-static int sSS = 1;  // composition supersampling: 2 in fill mode, 1 (exact) in 1:1 mode
+static int sSS = 1;     // the screen being drawn's composition supersampling (2 when scaled, 1 exact)
+static int sSSTop = 2;  // the top screen's
+static int sSSBot = 2;  // the bottom's: it always fills, at 2x, except while the 3D slider is up (bottom_ss_wanted)
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
 static int sWide;             // this frame's 3D layer is widened
@@ -814,7 +817,9 @@ static void scissor_ds(int whole) {
 }
 
 static void layout(int screenW) {
-    sScale = port_display_scaled() ? 1.25f : 1.0f;
+    int bottom = screenW == 320;
+    sScale = (bottom ? port_bottom_scaled() : port_display_scaled()) ? 1.25f : 1.0f;
+    sSS = bottom ? sSSBot : sSSTop;
     sScrW = screenW;
     sW = screenW / sScale; sH = 240 / sScale;
     sL = -(sW - 256) / 2; sT = -(sH - 192) / 2;
@@ -947,16 +952,29 @@ static bool sReady;
 
 // The display transfer from a composed screen to its framebuffer: halved (2x2 box filter) when
 // it was composed at twice the size.
-static u32 screen_transfer(void) {
+static u32 screen_transfer(int ss) {
     return GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
            GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-           GX_TRANSFER_SCALING(sSS == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO);
+           GX_TRANSFER_SCALING(ss == 2 ? GX_TRANSFER_SCALE_XY : GX_TRANSFER_SCALE_NO);
 }
 
 // The screens' render targets at a supersampling factor (made again when the display mode
 // changes: VRAM holds one size at a time).
 static void stereo_free(void);
 static bool make_targets_(int ss);
+// The bottom screen's supersampling: 2 (sharp, even 1.25x pixels), but 1 while stereoscopic 3D is
+// in use: VRAM holds the bottom's 2x target or the top screen's right eye, not both (6 MB). At 1x
+// the bottom still fills, a column and row in four doubled. (Slider read with some hysteresis:
+// changing it rebuilds VRAM, a frame's hitch.)
+extern int port_stereo_enabled;
+extern float port_stereo_force;
+static int bottom_ss_wanted(void) {
+    static int on;
+    float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
+    if (slider > 0.05f) on = 1;
+    else if (slider < 0.02f) on = 0;
+    return port_stereo_enabled && on && !port_display_scaled() ? 1 : 2;
+}
 static int s3dReadyAtStart;
 // The screens' targets at a supersampling factor, and everything else in VRAM made again after
 // them (the 3D layer; the right eye comes back when wanted), so the layout is always the one
@@ -976,17 +994,18 @@ static bool make_targets(int ss) {
 static bool make_targets_(int ss) {
     if (sTop) { C3D_RenderTargetDelete(sTop); sTop = NULL; }
     if (sBottom) { C3D_RenderTargetDelete(sBottom); sBottom = NULL; }
-    sSS = ss;
+    sSSTop = ss;  // (the top screen's; the bottom is always made at 2x)
+    int sb = sSSBot = bottom_ss_wanted();
     sTop = C3D_RenderTargetCreate(240 * ss, 400 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
-    sBottom = C3D_RenderTargetCreate(240 * ss, 320 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    sBottom = C3D_RenderTargetCreate(240 * sb, 320 * sb, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
     if (!sTop || !sBottom) {
         port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree());
         if (sTop) { C3D_RenderTargetDelete(sTop); sTop = NULL; }
         if (sBottom) { C3D_RenderTargetDelete(sBottom); sBottom = NULL; }
         return false;
     }
-    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
-    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
+    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer(ss));
+    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer(sb));
     return true;
 }
 
@@ -1038,7 +1057,7 @@ void port_gpu2d_bottom_console(int console) {
     } else {
         gfxSetScreenFormat(GFX_BOTTOM, GSP_BGR8_OES);
         gfxSetDoubleBuffering(GFX_BOTTOM, true);
-        C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
+        C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer(sSSBot));
     }
 }
 
@@ -1059,7 +1078,7 @@ void port_gpu2d_frame(void) {
         C3D_FrameEnd(0);
         stereo_free();
     }
-    if ((port_display_scaled() ? 2 : 1) != sSS) {  // (the display mode changed: targets of the other size)
+    if ((port_display_scaled() ? 2 : 1) != sSSTop || bottom_ss_wanted() != sSSBot) {  // (the display mode or the slider changed: targets of another size)
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);  // (the GPU done with the old ones)
         C3D_FrameEnd(0);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
@@ -1752,7 +1771,7 @@ static bool stereo_alloc(void) {
         sStereoFail = 1;
         return false;
     }
-    C3D_RenderTargetSetOutput(sTopR, GFX_TOP, GFX_RIGHT, screen_transfer());
+    C3D_RenderTargetSetOutput(sTopR, GFX_TOP, GFX_RIGHT, screen_transfer(1));
     port_log("gpu: right eye ready (VRAM free %lu)\n", (unsigned long)vramSpaceFree());
     return true;
 }
@@ -1762,7 +1781,7 @@ static bool stereo_alloc(void) {
 static void stereo_decide(int scene3d) {
     float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
     if (!port_stereo_enabled) return;  // (its VRAM is given back before the frame: port_gpu2d_frame)
-    int want = slider > 0.02f && sSS == 1 && scene3d;
+    int want = slider > 0.02f && sSSTop == 1 && scene3d;
     static int count;
     if (want == sStereo) count = 0;
     else if (++count >= 4 || !want) {

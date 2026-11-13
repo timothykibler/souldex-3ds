@@ -46,8 +46,8 @@ bool port_ctr_touch(uint16_t *x, uint16_t *y) {
     touchPosition t;
     hidTouchRead(&t);
     // (the DS screen 1:1 in the bottom screen's middle, or filling it at 1.25x)
-    extern int port_display_scaled(void);
-    int fill = port_display_scaled();
+    extern int port_bottom_scaled(void);
+    int fill = port_bottom_scaled();
     int dx = fill ? (int)t.px * 4 / 5 : (int)t.px - 32, dy = fill ? (int)t.py * 4 / 5 : (int)t.py - 24;
     if (dx < 0 || dy < 0 || dx >= 256 || dy >= 192) return false;
     *x = (uint16_t)dx;
