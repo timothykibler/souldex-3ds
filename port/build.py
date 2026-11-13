@@ -58,7 +58,9 @@ A7_EXTERN = {
 
 def compile_arm7_sound(flags):
     sdk = f"{ROOT}/pokeheartgold/subprojects/NitroSDK-4.2.30001/libraries/snd/src"
-    srcs = sorted(glob.glob(f"{sdk}/ARM7/*.c")) + [f"{sdk}/{f}" for f in
+    # (the channel layer through the port's wrapper: port/arm7/snd_channel_port.c)
+    srcs = [s for s in sorted(glob.glob(f"{sdk}/ARM7/*.c")) if not s.endswith("snd_channel.c")] + \
+           [f"{ROOT}/port/arm7/snd_channel_port.c", f"{ROOT}/port/arm7/snd_diag.c"] + [f"{sdk}/{f}" for f in
             ("snd_command.c", "snd_work.c", "snd_util.c", "snd_bank.c", "snd_alarm.c", "snd_data.c")]
     out = f"{B}/obj/a7"
     os.makedirs(out, exist_ok=True)
@@ -69,6 +71,8 @@ def compile_arm7_sound(flags):
     for s in srcs:
         o = f"{out}/{os.path.basename(s)}.o"
         extra = ["-USDK_TS"] if s.endswith("snd_util.c") else []  # (the SDK's own pitch/volume tables, not the ARM7 BIOS's)
+        if s.endswith("snd_channel_port.c"):
+            extra = [f"-I{sdk}/ARM7"]
         run([CC, "-c"] + cg.CFLAGS + ["-w"] + flags7 + extra + [s, "-o", o])
         objs.append(o)
     ld = CC.replace("gcc", "ld")

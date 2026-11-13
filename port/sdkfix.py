@@ -47,6 +47,14 @@ FIXES = {
         ("static asm void GXi_NopClearFifo128_(register void *pDest);",
          "static void GXi_NopClearFifo128_(void *pDest) { (void)pDest; for (int i = 0; i < 32; i++) port_gx_fifo_write(0); }"),
     ]),
+    # The game asks for volume 128 (field_warp_tasks.c, field_control.c: "back to full"), one past
+    # this 128-entry table. On the DS the next word in the ARM9 binary is 0 (0 dB: full volume);
+    # in the port it was other data (+229 dB: every channel at maximum, clipping). So: one more 0.
+    f"{SDK}/snd/src/snd_util.c": dict(sub=[
+        ("const s16 SNDi_DecibelTable[SND_DECIBEL_TABLE_SIZE] = {",
+         'const s16 port_SNDi_DecibelTable[SND_DECIBEL_TABLE_SIZE + 1] __asm__("SNDi_DecibelTable") = {'),
+        ("-5, -4, -3, -3, -2, -1, -1, 0\n};", "-5, -4, -3, -3, -2, -1, -1, 0,\n    0\n};"),
+    ]),
     f"{SDK}/math/src/math.c": dict(sub=[("defined(SDK_ARM9) && (defined(SDK_CW) || defined(__MWERKS__))", "0")]),
     f"{SDK}/math/src/checksum.c": dict(regex=[
         # Metrowerks lets a cast be incremented: *((T *)p)++ reads a T and moves p on by one.

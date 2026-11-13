@@ -20,6 +20,7 @@
 
 // ---------------------------------------------------------------- the ARM7 side's I/O registers
 unsigned char port_a7_io[0x1000] __attribute__((aligned(4)));
+volatile unsigned char port_a7_restart[16];  // (set by the driver's channel set-up / stop: port/arm7)
 #define REG8(o) (*(volatile u8 *)(port_a7_io + (o)))
 #define REG16(o) (*(volatile u16 *)(port_a7_io + (o)))
 #define REG32(o) (*(volatile u32 *)(port_a7_io + (o)))
@@ -227,6 +228,8 @@ static int chan_sample(int i, u32 cnt) {
 // (checking: ticks run, the most channels on at once, the loudest sample, since the last report;
 // and debug.txt "wavdump": the first 30 s of output into sound.wav)
 static volatile u32 sTicks, sPeakChannels, sPeakLevel;
+static u32 sChPeak[16], sChVol[16];
+static u8 sChFmt[16];
 int port_snd_wavdump;
 static FILE *sWav;
 static u32 sWavFrames;
@@ -239,12 +242,14 @@ static void mix(s16 *out, int frames) {
         if (soundcnt & 0x8000) {
             for (int i = 0; i < 16; i++) {
                 u32 cnt = REG32(0x400 + i * 16);
+                if (port_a7_restart[i]) { port_a7_restart[i] = 0; sCh[i].on = 0; }  // (set up again: starts afresh)
                 if (!(cnt & 0x80000000u)) { sCh[i].on = 0; continue; }
                 if (!sCh[i].on) chan_start(i);
                 if (!sCh[i].on) continue;
                 s32 s = chan_sample(i, cnt);
                 static const u8 kShift[4] = { 0, 1, 2, 4 };
                 s = s * (s32)(cnt & 0x7F) / 128 >> kShift[(cnt >> 8) & 3];
+                { u32 a = (u32)(s < 0 ? -s : s); if (a > sChPeak[i]) sChPeak[i] = a; sChFmt[i] = (u8)sCh[i].format; sChVol[i] = cnt & 0x37F; }
                 int pan = (cnt >> 16) & 0x7F;
                 l += s * (128 - pan) / 128;
                 r += s * pan / 128;
@@ -309,9 +314,15 @@ static void fill(s16 *out, int frames) {
     }
 }
 
+void a7_SND_PortDiag(char *out, int cap);
 void port_snd_report(void) {
+    { static char d[2048]; d[0] = 0; a7_SND_PortDiag(d, sizeof(d)); port_log("  sound state:%s\n", d); }
     port_log("  sound: %lu driver ticks, up to %lu channels, peak level %lu\n", (unsigned long)sTicks,
              (unsigned long)sPeakChannels, (unsigned long)sPeakLevel);
+    port_log("  sound channels (format:peak/vol):");
+    for (int i = 0; i < 16; i++) port_log(" %d:%u:%lu/%03lX", i, sChFmt[i], (unsigned long)sChPeak[i], (unsigned long)sChVol[i]);
+    port_log("\n");
+    memset(sChPeak, 0, sizeof(sChPeak));
     port_log("  sound commands:");
     for (int i = 0; i < 40; i++) if (sCmdCount[i]) port_log(" %d:%lu", i, (unsigned long)sCmdCount[i]);
     port_log("\n");
