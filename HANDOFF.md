@@ -11,7 +11,7 @@ the build; this file is the state of play and how to pick it up.
 | Phase | State |
 |---|---|
 | 0: boots | Done. Existing saves load (the main menu's Continue); wild battles work. |
-| 1: 2D | Done. Pixel-identical to the software reference renderer (0 differing pixels on 2D frames). Shown 1:1. |
+| 1: 2D | Done. Pixel-identical to the software reference renderer (`scale1` mode). Shown at 1.25x, filling each screen's height (as fulldex does), composed at 2x and box-filtered down so pixels stay even. |
 | 2: 3D | Works in the intro, overworld and battles: geometry engine + PICA renderer, edge marking, top screen widened to 400x240 when the 3D covers the DS frame (overworld). |
 | 3: sound | Not started. Sound commands are acknowledged instantly (`PXI_SendWordByFifo` in `devices.c`). |
 | Speed | Azahar (whose ticks are, as far as known, original-3DS speed): battle 59 fps; overworld ~30 fps, CPU-bound (game code ~16 ms incl. the geometry engine ~6 ms, frame building ~6 ms). Not yet measured on hardware. |
@@ -35,7 +35,11 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    in debug.txt logs every write and the value it replaced.
 6. **Phase 3, sound**: run the decomp's ARM7 sound driver (`libsnd_arm7`) on a second core, mix the
    16 channels, output through NDSP.
-7. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`
+7. **Stereoscopic 3D** (wanted if it's simple and looks like current 3DS titles): draw the 3D
+   layer once per eye with a depth-dependent horizontal shift (x_clip += eye * sep * (w - conv),
+   from the slider: osGet3DSliderState), 2D layers at the screen plane; gfxSet3D and a right-eye
+   target. Mostly the overworld and battles.
+8. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`
    packing, H-blank DMA effects, mosaic, bitmap sprites, microphone, RTC uses UTC, VRAM bank
    remapping isn't modelled (each window is its own memory; a first attempt broke battles).
 
@@ -64,7 +68,9 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
   (both 3DS screens). Reaching the overworld from a save: `mash 300 600 30 START` + `press 700 A`
   (save at Azahar's `sdmc/3ds/soulsilver-3ds/soulsilver.sav`); a wild battle: then
   `mash 840 880 8 RIGHT` and alternate DOWN/UP holds in the grass.
-- **debug.txt keys**: `dump N`, `press F KEY`, `mash F T P KEY`, `trace3d F`, `wide 0|1|2`,
+- **debug.txt keys**: `scale1` (DS picture 1:1, for the pixel comparison; at 2x composition one
+  animated intro frame (1200) can compare against the frame next to it: a capture-timing quirk),
+  `dump N`, `press F KEY`, `mash F T P KEY`, `trace3d F`, `wide 0|1|2`,
   `edge 0|1|2` (2 shows the polygon-ID image), `cheatlog`. The log also lists failed GF_ASSERTs with their
   caller (look up in `build-3ds/soulsilver.map`) and every 600 frames a time breakdown.
 - **Test in Azahar** (downloaded to the old session's scratch folder; re-download

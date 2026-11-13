@@ -87,6 +87,7 @@ int main(void) {
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
+            else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
             else if (sscanf(line, "mash %u %u %u %15s", &n, &m, &per, key) == 4) {

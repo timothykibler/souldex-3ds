@@ -41,14 +41,21 @@ static Vtx *sVbo;
 static int sVtxUsed;
 static float sOX, sOY;  // (offset added to every quad: 0, the projection places the DS picture)
 
-// Screen layout. The DS picture is shown 1:1 (exact pixels) in the middle of each screen. On the
-// top screen the 3D layer can be widened to fill all of it (400x240): the DS frustum is extended
-// on both axes (clip x scaled by 256/400, y by 192/240), so what's inside the DS frame lands
-// exactly where it would, at the same scale as the 2D, and the border shows more of the scene.
-int port_wide_mode = 1;
-int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
+// Screen layout. The DS picture fills each screen's height: 1.25x (256x192 -> 320x240), the
+// bottom screen exactly, the top screen with 40 pixels either side. On the top screen the 3D
+// layer can be widened to fill all of it (400x240): the DS frustum is extended sideways (clip x
+// scaled by 320/400), so what's inside the DS frame lands exactly where it would, at the same
+// scale as the 2D, and the sides show more of the scene. The 3D is drawn at the screen's own
+// resolution. The screens are composed at twice their size (SS) and halved by the display
+// transfer (a 2x2 box filter): the 2D, drawn at 2.5x with sharp pixels, ends up at 1.25x with
+// pixels of even size (slightly soft edges) instead of nearest scaling's 2-1-2-1 columns.
+// (debug.txt "scale1": the DS picture 1:1, exact, for the comparison with the software renderer.)
+int port_wide_mode = 1;    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
+int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)
+int port_scale1;
 float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
-static const float sScale = 1.0f;
+static float sScale = 1.25f;
+#define SS 2  // (composition supersampling)
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
 static int sWide;             // this frame's 3D layer is widened
@@ -632,7 +639,10 @@ static void spr_quads(void *arg) {
     C3D_TexBind(0, &sSheet[d->ei]);
     const float SW = SHEET_W, SH = SHEET_H;
     if (!s->affine) {
-        quad(s->x, s->y, s->x + s->w, s->y + s->h, s->sx / SW, s->sy / SH, (s->sx + s->w) / SW, (s->sy + s->h) / SH);
+        // (a sliver of a texel in from the cell's edge: at non-integer scales a pixel on the quad's
+        // edge mustn't sample the next cell)
+        const float in = 1.0f / 64;
+        quad(s->x, s->y, s->x + s->w, s->y + s->h, (s->sx + in) / SW, (s->sy + in) / SH, (s->sx + s->w - in) / SW, (s->sy + s->h - in) / SH);
         return;
     }
     C3D_TexBind(0, s->tex);
@@ -732,13 +742,14 @@ static void flat(u32 abgr, int x0, int y0, int x1, int y1) {
 // The scissor box around the DS picture (or the whole screen), in the screen target's own
 // (rotated) coordinates.
 static void scissor_ds(int whole) {
-    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240, (u32)sScrW); return; }
-    int x0 = (int)(-sL * sScale + 0.5f), y0 = (int)(-sT * sScale + 0.5f);
-    int w = (int)(256 * sScale + 0.5f), h = (int)(192 * sScale + 0.5f);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 - (y0 + h)), (u32)x0, (u32)(240 - y0), (u32)(x0 + w));
+    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240 * SS, (u32)sScrW * SS); return; }
+    int x0 = (int)(-sL * sScale * SS + 0.5f), y0 = (int)(-sT * sScale * SS + 0.5f);
+    int w = (int)(256 * sScale * SS + 0.5f), h = (int)(192 * sScale * SS + 0.5f);
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 * SS - (y0 + h)), (u32)x0, (u32)(240 * SS - y0), (u32)(x0 + w));
 }
 
 static void layout(int screenW) {
+    sScale = port_scale1 ? 1.0f : 1.25f;
     sScrW = screenW;
     sW = screenW / sScale; sH = 240 / sScale;
     sL = -(sW - 256) / 2; sT = -(sH - 192) / 2;
@@ -854,6 +865,13 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
 // ---------------------------------------------------------------- frames
 static bool sReady;
 
+// The display transfer from a composed screen to its framebuffer: halved (2x2 box filter).
+static u32 screen_transfer(void) {
+    return GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+           GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGB8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+           GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_XY);
+}
+
 bool port_gpu2d_init(void) {
     port_log("gpu: init\n");
     if (!C3D_Init(C3D_DEFAULT_CMDBUF_SIZE * 4)) return false;
@@ -874,15 +892,16 @@ bool port_gpu2d_init(void) {
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
     BufInfo_Add(bi, sVbo, sizeof(Vtx), 2, 0x10);
-    const u32 xfer = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                     GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                     GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-    sTop = C3D_RenderTargetCreate(240, 400, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
-    sBottom = C3D_RenderTargetCreate(240, 320, GPU_RB_RGBA8, GPU_RB_DEPTH24_STENCIL8);
+    // (the screens at twice their size, 24-bit colour: 16-bit rounds each blend step, and layered
+    // blends drift from the DS's. Each has its own depth-stencil buffer: citro3d clears every
+    // buffer at the frame's start, so a shared one would reach the second screen used.)
+    sTop = C3D_RenderTargetCreate(240 * SS, 400 * SS, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    sBottom = C3D_RenderTargetCreate(240 * SS, 320 * SS, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
     if (!sTop || !sBottom) { port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree()); return false; }
-    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, xfer);
-    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, xfer);
+    C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
+    C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
     if (!init3d()) port_log("gpu: no 3D layer\n");
+    port_log("gpu: VRAM free %lu\n", (unsigned long)vramSpaceFree());
     port_log("gpu: ready\n");
     sReady = true;
     return true;
@@ -897,10 +916,7 @@ void port_gpu2d_bottom_console(int console) {
     } else {
         gfxSetScreenFormat(GFX_BOTTOM, GSP_BGR8_OES);
         gfxSetDoubleBuffering(GFX_BOTTOM, true);
-        const u32 xfer = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
-                         GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
-                         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
-        C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, xfer);
+        C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
     }
 }
 
@@ -925,8 +941,8 @@ void port_gpu2d_frame(void) {
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
     { u64 t = svcGetSystemTick(); render3d(a_on_top ? 400 : 320); gProf3d += svcGetSystemTick() - t; }
-    C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0x000000FF, 0);
-    C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0x000000FF, 0);
+    C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0, 0);  // (0: black in any colour format)
+    C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0, 0);
     render_engine(&a, a_on_top ? sTop : sBottom, a_on_top ? 400 : 320);
     render_engine(&b, a_on_top ? sBottom : sTop, a_on_top ? 320 : 400);
     u64 dt = svcGetSystemTick() - t0;
@@ -946,9 +962,12 @@ void port_gpu2d_readback(u16 *top, u16 *bottom) {
         gfxSetDoubleBuffering(GFX_BOTTOM, false);
         sReadable = 1;
     }
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);  // (waits for the GPU and the transfer to the screens)
+    // (the frame just drawn, all the way to the framebuffers: C3D_FrameBegin waits for the whole
+    // previous queue, its display transfers included; an empty frame transfers nothing)
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     C3D_FrameEnd(0);
-    gspWaitForPPF();
+    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C3D_FrameEnd(0);
     for (int s = 0; s < 2; s++) {
         u16 w, h;
         const u8 *fb = gfxGetFramebuffer(s == 0 ? GFX_TOP : GFX_BOTTOM, GFX_LEFT, &w, &h);
@@ -1095,12 +1114,12 @@ static bool init3d(void) {
     shaderProgramInit(&sProgEdge);
     shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
     sVboEdge = linearAlloc(sizeof(VE) * 6 * 8);
-    if (sVboEdge && C3D_TexInitVRAM(&sIdTex, 512, 256, GPU_RGBA8)) {
+    if (sVboEdge && C3D_TexInitVRAM(&sIdTex, 512, 256, GPU_RGB8)) {  // (ID and depth: no alpha)
         C3D_TexSetFilter(&sIdTex, GPU_NEAREST, GPU_NEAREST);
         C3D_TexSetWrap(&sIdTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
         // (its own depth buffer: an "equal" test against the 3D pass's fails on alternate
         // columns, the PICA doesn't reproduce depths bit for bit between passes)
-        sIdTarget = C3D_RenderTargetCreateFromTex(&sIdTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+        sIdTarget = C3D_RenderTargetCreateFromTex(&sIdTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
     }
     s3dReady = 1;
     return true;
@@ -1558,7 +1577,7 @@ static void render3d(int screenW) {
         // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
         // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
         int ida = (clear >> 24) & 63;
-        C3D_RenderTargetClear(sIdTarget, C3D_CLEAR_ALL, (u32)(ida * 4) << 24 | 0xFF, 0);
+        C3D_RenderTargetClear(sIdTarget, C3D_CLEAR_ALL, (u32)(ida * 4) << 16, 0);  // (the target's own format: RGB8, R in bits 16-23)
         C3D_FrameDrawOn(sIdTarget);
         C3D_SetViewport(vpx, vpy, vpw, vph);
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
