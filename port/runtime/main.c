@@ -85,6 +85,7 @@ int main(void) {
             unsigned n, m, per;
             char key[16];
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
+            else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
@@ -99,6 +100,8 @@ int main(void) {
         }
         fclose(dbg);
     }
+    extern void port_cheats_init(void);
+    port_cheats_init();
     port_run_main_sinit();
     port_log("starting the game\n");
     NitroMain();

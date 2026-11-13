@@ -29,7 +29,10 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    Edge marking uses one edge colour (HGSS sets all eight alike).
 4. **Assembly that writes 3D command registers directly** (`sub_02015E64`, `sub_020161CC`,
    `ov41_022465D8`; overlay 41 only): see the git history of this file for the decoded plan.
-5. **Cheats**: usrcheat.dat (TWiLight Menu++ format) on/off from a menu.
+5. **Cheats** (done, `runtime/cheats.c`, `port/cheatmap.py`): verified in Azahar that Max Money
+   writes the save's money field. The menu (ZL+ZR / L+R+SELECT) is untested on hardware. Codes
+   whose addresses fall in unnamed BSS gaps or overlay data don't translate (skipped); `cheatlog`
+   in debug.txt logs every write and the value it replaced.
 6. **Phase 3, sound**: run the decomp's ARM7 sound driver (`libsnd_arm7`) on a second core, mix the
    16 channels, output through NDSP.
 7. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`
@@ -62,7 +65,7 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
   (save at Azahar's `sdmc/3ds/soulsilver-3ds/soulsilver.sav`); a wild battle: then
   `mash 840 880 8 RIGHT` and alternate DOWN/UP holds in the grass.
 - **debug.txt keys**: `dump N`, `press F KEY`, `mash F T P KEY`, `trace3d F`, `wide 0|1|2`,
-  `edge 0|1|2` (2 shows the polygon-ID image). The log also lists failed GF_ASSERTs with their
+  `edge 0|1|2` (2 shows the polygon-ID image), `cheatlog`. The log also lists failed GF_ASSERTs with their
   caller (look up in `build-3ds/soulsilver.map`) and every 600 frames a time breakdown.
 - **Test in Azahar** (downloaded to the old session's scratch folder; re-download
   `azahar-macos-arm64-2126.2.zip` from github.com/azahar-emu/azahar/releases if gone):

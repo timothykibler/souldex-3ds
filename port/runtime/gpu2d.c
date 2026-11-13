@@ -888,6 +888,22 @@ bool port_gpu2d_init(void) {
     return true;
 }
 
+// The bottom screen lent to a text console (the cheat menu) and given back.
+void port_gpu2d_bottom_console(int console) {
+    if (!sReady) return;
+    if (console) {
+        C3D_FrameSync();
+        C3D_RenderTargetSetOutput(NULL, GFX_BOTTOM, GFX_LEFT, 0);
+    } else {
+        gfxSetScreenFormat(GFX_BOTTOM, GSP_BGR8_OES);
+        gfxSetDoubleBuffering(GFX_BOTTOM, true);
+        const u32 xfer = GX_TRANSFER_FLIP_VERT(0) | GX_TRANSFER_OUT_TILED(0) | GX_TRANSFER_RAW_COPY(0) |
+                         GX_TRANSFER_IN_FORMAT(GX_TRANSFER_FMT_RGBA8) | GX_TRANSFER_OUT_FORMAT(GX_TRANSFER_FMT_RGB8) |
+                         GX_TRANSFER_SCALING(GX_TRANSFER_SCALE_NO);
+        C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, xfer);
+    }
+}
+
 // Draws both engines onto their screens (engine A on top when POWCNT1 bit 15 says so).
 static int sReadable;  // (screenshot mode: single-buffered screens, so what's shown can be read)
 

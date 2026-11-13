@@ -94,6 +94,8 @@ void port_frame(void) {
     port_input_update();
     extern void port_wm_frame(void);
     port_wm_frame();
+    extern void port_cheats_frame(void);
+    port_cheats_frame();
     run_alarms();
     // The game's VBlank handler (OS_SetIrqFunction(OS_IE_V_BLANK, ...)): it does the frame's
     // transfers and sets the interrupt check flag the main loop waits for.

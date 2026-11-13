@@ -138,6 +138,7 @@ def main():
     if r.returncode:
         print(r.stderr[-6000:])
         sys.exit(1)
+    run(["python3", f"{ROOT}/port/cheatmap.py", elf])  # (the cheat engine's address table, into the ELF)
     run([DKA.replace("arm-none-eabi-", "") + "../../tools/bin/smdhtool", "--create", "SoulSilver 3DS",
          "Phase 0 port (pokeheartgold)", "personal build", f"{ROOT}/port/icon.png", f"{B}/soulsilver.smdh"],
         stdout=subprocess.DEVNULL)

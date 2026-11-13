@@ -35,6 +35,15 @@ Put your SoulSilver (US, IPGE) ROM at `sdmc:/3ds/soulsilver-3ds/soulsilver.nds` 
 The bottom screen and `sdmc:/3ds/soulsilver-3ds/log.txt` show what it's doing. Saves go to
 `sdmc:/3ds/soulsilver-3ds/soulsilver.sav`, in the raw format TWiLight Menu++ uses.
 
+## Cheats
+
+Put a `usrcheat.dat` (the R4 / TWiLight Menu++ format, e.g. DeadSkullzJr's database) at
+`sdmc:/3ds/soulsilver-3ds/usrcheat.dat` (or leave it in TWiLight's `sd:/_nds/TWiLightMenu/extras/`).
+In game, **ZL+ZR** (or **L+R+SELECT**) opens the cheat menu on the bottom screen: A opens a folder
+or turns a code on/off, B closes. Choices are kept in `cheats.txt`. Codes that change game data
+work (money, items, steps, Pokemon...); codes that patch the DS's machine code can't apply to this
+build and do nothing.
+
 ## How it fits together
 
 | Piece | Where |
