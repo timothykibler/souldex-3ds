@@ -1,13 +1,27 @@
 #!/usr/bin/env bash
 # Makes build-3ds/soulsilver.cia from build-3ds/soulsilver.elf (after port/build.py).
-# Uses the ss3ds-cia image (devkitARM + makerom + bannertool: docker/cia/Dockerfile), built here if missing.
+# Uses the ss3ds-cia image (devkitARM + makerom + bannertool + Pillow: docker/cia/Dockerfile), built here if missing.
+# HOME Menu art (icon, banner, titles) comes from your ROM (tools/cia_art.py): SS3DS_ROM=path/to/rom.nds,
+# or the copy Azahar uses; without one, the plain placeholders in port/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 docker image inspect ss3ds-cia >/dev/null 2>&1 || docker build -q -t ss3ds-cia docker/cia >/dev/null
-docker run --rm -v "$PWD":/w -w /w/build-3ds ss3ds-cia sh -c '
+ROM="${SS3DS_ROM:-$HOME/Library/Application Support/Azahar/sdmc/3ds/soulsilver-3ds/soulsilver.nds}"
+ROMARG=()
+if [ -f "$ROM" ]; then ROMARG=(-v "$ROM":/rom.nds:ro); else echo "package: no ROM at $ROM: placeholder art"; fi
+docker run --rm -v "$PWD":/w "${ROMARG[@]}" -w /w/build-3ds ss3ds-cia sh -c '
   set -e
-  bannertool makesmdh -s "SoulSilver 3DS" -l "SoulSilver 3DS port, phase 0" -p "personal build" -i /w/port/icon.png -o soulsilver.smdh >/dev/null
-  bannertool makebanner -i /w/port/icon-banner.png -a /w/port/silence.wav -o soulsilver.bnr >/dev/null
+  mkdir -p art
+  if [ -f /rom.nds ]; then
+    python3 /w/tools/cia_art.py /rom.nds art
+    ICON=art/icon.png; BANNER=art/banner.png
+    SHORT=$(sed -n 1p art/titles.txt); LONG=$(sed -n 2p art/titles.txt); PUB=$(sed -n 3p art/titles.txt)
+  else
+    ICON=/w/port/icon.png; BANNER=/w/port/icon-banner.png
+    SHORT="SoulSilver 3DS"; LONG="SoulSilver 3DS port"; PUB="personal build"
+  fi
+  bannertool makesmdh -s "$SHORT" -l "$LONG" -p "$PUB" -i "$ICON" -o soulsilver.smdh >/dev/null
+  bannertool makebanner -i "$BANNER" -a /w/port/silence.wav -o soulsilver.bnr >/dev/null
   arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf 2>/dev/null || /opt/devkitpro/devkitARM/bin/arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf
   makerom -f cia -o soulsilver.cia -rsf /w/port/cia.rsf -target t -exefslogo -elf soulsilver-stripped.elf -icon soulsilver.smdh -banner soulsilver.bnr
 '

@@ -1,6 +1,7 @@
-# devkitARM plus the two CIA tools it lacks (makerom, bannertool), built from source.
+# devkitARM plus the two CIA tools it lacks (makerom, bannertool), built from source; Pillow and a
+# font for the HOME Menu art (tools/cia_art.py).
 FROM devkitpro/devkitarm:latest
-RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates python3 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential cmake git ca-certificates python3 python3-pil fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 --branch makerom-v0.18.4 https://github.com/3DSGuy/Project_CTR.git /tmp/ctr \
  && make -C /tmp/ctr/makerom deps && make -C /tmp/ctr/makerom \
  && find /tmp/ctr/makerom -name makerom -type f -perm -u+x -exec cp {} /usr/local/bin/makerom \; \
