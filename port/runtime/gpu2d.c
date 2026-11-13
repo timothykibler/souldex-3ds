@@ -32,7 +32,10 @@ extern const u32 quad_shbin_size;
 static DVLB_s *sDvlb;
 static shaderProgram_s sProg;
 static int sProjLoc;
-static C3D_RenderTarget *sTop, *sBottom;
+static C3D_RenderTarget *sTop, *sBottom, *sTopR;  // (sTopR: the top screen's right eye, stereoscopic 3D)
+static int sStereo;  // this frame draws two eyes (stereoscopic 3D, below)
+static int sRepeat;  // composing the top screen again (right eye): this frame's planes and sprites as they are
+static void stereo_decide(int scene3d);
 
 // ---------------------------------------------------------------- vertices
 typedef struct { float x, y, u, v; } Vtx;
@@ -246,6 +249,7 @@ static Plane *text_plane(const Eng *e, int bg) {
     int bpp8 = (cnt >> 7) & 1;
     const u8 *ext = (bpp8 && (e->dispcnt & (1u << 30))) ? ext_palette(e, (bg < 2 && (cnt & 0x2000)) ? bg + 2 : bg) : NULL;
     Plane *p = &sPlane[!e->main][bg];
+    if (sRepeat) return p->built ? p : NULL;
     if (!plane_alloc(p, w, h, true)) return NULL;
     if (!p->map) {
         p->map = malloc(64 * 64 * 2);
@@ -335,6 +339,7 @@ static Plane *affine_plane(const Eng *e, int bg, int extended, int *wrapOut) {
     *wrapOut = wrap;
     u32 cb = char_base(e, cnt), sb = screen_base(e, cnt);
     Plane *p = &sPlane[!e->main][bg];
+    if (sRepeat) return p->tex.data ? p : NULL;
     u32 hsh = 2166136261u ^ cnt ^ (extended << 16);
     if (!extended || !(cnt & 0x80)) {
         int dim = 128 << size;
@@ -420,6 +425,7 @@ static Spr sSpr[2][128];
 static int sNumSpr[2];
 
 static void sprites_build(const Eng *e) {
+    if (sRepeat) return;
     int ei = !e->main;
     sNumSpr[ei] = 0;
     if (!(e->dispcnt & 0x1000) && !(e->dispcnt & 0x8000)) return;
@@ -604,6 +610,9 @@ static C3D_Tex s3dTex;
 static C3D_Tex sIdTex;                 // edge marking's polygon-ID image (see the 3D layer)
 static C3D_RenderTarget *sIdTarget;
 static int s3dHave;
+// Stereoscopic 3D: the right eye's 3D layer and ID image, and which ones the compositor uses
+static C3D_Tex s3dTexR, sIdTexR;
+static C3D_Tex *s3dCur = &s3dTex, *sIdCur = &sIdTex;
 static void render3d(int screenW);
 static void flush_edge_vertices(void);
 static bool init3d(void);
@@ -612,7 +621,7 @@ static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
     if (d->kind == 3) {  // the 3D layer: rendered at the screen's own resolution, the whole screen
-        C3D_TexBind(0, port_edge_mode >= 2 && sIdTarget ? &sIdTex : &s3dTex);
+        C3D_TexBind(0, port_edge_mode >= 2 && sIdTarget ? sIdCur : s3dCur);
         if (sWide) scissor_ds(1);
         quad(sL, sT, sL + sW, sT + sH, 0, 0, sScrW / 512.0f, 240 / 256.0f);
         if (sWide) scissor_ds(0);
@@ -773,10 +782,12 @@ static void engine_from_software(int ei) {
     static C3D_Tex fb;
     if (!fb.data && !C3D_TexInit(&fb, 256, 256, GPU_RGBA5551)) return;
     C3D_TexSetFilter(&fb, GPU_NEAREST, GPU_NEAREST);
-    port_render2d_engine_sw(ei, img);
-    for (int y = 0; y < 192; y++)
-        for (int x = 0; x < 256; x++) *tex_px(fb.data, 256, 256, x, y) = sColor[img[y * 256 + x] & 0x7FFF];
-    C3D_TexFlush(&fb);
+    if (!sRepeat) {
+        port_render2d_engine_sw(ei, img);
+        for (int y = 0; y < 192; y++)
+            for (int x = 0; x < 256; x++) *tex_px(fb.data, 256, 256, x, y) = sColor[img[y * 256 + x] & 0x7FFF];
+        C3D_TexFlush(&fb);
+    }
     set_tev(TEV_PLAIN, 0);
     blend_off();
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
@@ -940,7 +951,9 @@ static u32 screen_transfer(void) {
 
 // The screens' render targets at a supersampling factor (made again when the display mode
 // changes: VRAM holds one size at a time).
+static void stereo_free(void);
 static bool make_targets(int ss) {
+    stereo_free();  // (its VRAM: the larger targets may need it)
     if (sTop) C3D_RenderTargetDelete(sTop);
     if (sBottom) C3D_RenderTargetDelete(sBottom);
     sSS = ss;
@@ -1030,11 +1043,18 @@ void port_gpu2d_frame(void) {
     a = (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
+    stereo_decide(a_on_top && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     { u64 t = svcGetSystemTick(); render3d(a_on_top ? 400 : 320); gProf3d += svcGetSystemTick() - t; }
     C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0, 0);  // (0: black in any colour format)
     C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0, 0);
     render_engine(&a, a_on_top ? sTop : sBottom, a_on_top ? 400 : 320);
     render_engine(&b, a_on_top ? sBottom : sTop, a_on_top ? 320 : 400);
+    if (sStereo && sTopR) {  // the right eye: the top screen again, with the right eye's 3D layer
+        C3D_RenderTargetClear(sTopR, C3D_CLEAR_ALL, 0, 0);
+        s3dCur = &s3dTexR; sIdCur = &sIdTexR; sRepeat = 1;
+        render_engine(&a, sTopR, 400);
+        s3dCur = &s3dTex; sIdCur = &sIdTex; sRepeat = 0;
+    }
     u64 dt = svcGetSystemTick() - t0;
     gGpu2dBusyTicks += dt;
     if (dt > gGpu2dMaxTicks) gGpu2dMaxTicks = dt;
@@ -1084,8 +1104,9 @@ void port_gpu2d_dump_full(u32 frame) {
         port_log("frame %lu: wide %d BGCNT %04X %04X %04X %04X DISPCNT %08lX DISP3DCNT %04X CLEAR %08lX vp %d,%d,%d,%d\n", (unsigned long)frame, sWide, rd16(DS(0x04000008)), rd16(DS(0x0400000A)), rd16(DS(0x0400000C)), rd16(DS(0x0400000E)), rd32(DS(0x04000000)),
                  *(volatile u16 *)DS(0x04000060), *(volatile u32 *)DS(0x04000350), g ? g->viewport[0] : -1, g ? g->viewport[1] : -1, g ? g->viewport[2] : -1, g ? g->viewport[3] : -1);
     }
+    for (int eye = 0; eye < 1 + (sStereo != 0); eye++) {  // (with stereo also full_N_r: the right eye on top)
     char path[96];
-    snprintf(path, sizeof(path), "sdmc:/3ds/soulsilver-3ds/full_%05lu.bmp", (unsigned long)frame);
+    snprintf(path, sizeof(path), "sdmc:/3ds/soulsilver-3ds/full_%05lu%s.bmp", (unsigned long)frame, eye ? "_r" : "");
     FILE *f = fopen(path, "wb");
     if (!f) return;
     const int W = 400, H = 480, rowb = W * 3, size = 54 + rowb * H;
@@ -1098,12 +1119,13 @@ void port_gpu2d_dump_full(u32 frame) {
         memset(row, 0, sizeof(row));
         int s = y >= 240, sy = y % 240;
         u16 fw, fh;
-        const u8 *fb = gfxGetFramebuffer(s ? GFX_BOTTOM : GFX_TOP, GFX_LEFT, &fw, &fh);
+        const u8 *fb = gfxGetFramebuffer(s ? GFX_BOTTOM : GFX_TOP, s || !eye ? GFX_LEFT : GFX_RIGHT, &fw, &fh);
         int ox = (W - fh) / 2;
         for (int x = 0; x < fh; x++) memcpy(row + (x + ox) * 3, fb + (x * 240 + (239 - sy)) * 3, 3);
         fwrite(row, 1, rowb, f);
     }
     fclose(f);
+    }
 }
 
 // For debugging: an engine's display registers and visible sprites.
@@ -1148,12 +1170,12 @@ extern const u8 polyid_shbin[];
 extern const u32 polyid_shbin_size;
 static DVLB_s *sDvlbId;
 static shaderProgram_s sProgId;
-static int sLocXform, sLocTc, sLocXformId, sLocTcId, sLocIdp;
+static int sLocXform, sLocTc, sLocXformId, sLocTcId, sLocIdp, sLocStereo, sLocStereoId;
 extern const u8 edge_shbin[];
 extern const u32 edge_shbin_size;
 static DVLB_s *sDvlb3d, *sDvlbEdge;
 static shaderProgram_s sProg3d, sProgEdge;
-static C3D_RenderTarget *s3dTarget;
+static C3D_RenderTarget *s3dTarget, *s3dTargetR, *sIdTargetR;
 // Edge marking: each opaque pixel's polygon ID (R, as ID * 4) and depth (G, larger = nearer),
 // drawn into its own image against the 3D layer's depth buffer.
 typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
@@ -1190,12 +1212,14 @@ static bool init3d(void) {
     shaderProgramSetVsh(&sProg3d, &sDvlb3d->DVLE[0]);
     sLocXform = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "xform");
     sLocTc = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "tcscale");
+    sLocStereo = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "stereo");
     sDvlbId = DVLB_ParseFile((u32 *)polyid_shbin, polyid_shbin_size);
     shaderProgramInit(&sProgId);
     shaderProgramSetVsh(&sProgId, &sDvlbId->DVLE[0]);
     sLocXformId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "xform");
     sLocTcId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "tcscale");
     sLocIdp = shaderInstanceGetUniformLocation(sProgId.vertexShader, "idp");
+    sLocStereoId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "stereo");
     if (!C3D_TexInitVRAM(&s3dTex, 512, 256, GPU_RGBA8)) return false;
     C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
     s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
@@ -1534,8 +1558,8 @@ static void draw_edges(void) {
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     C3D_AlphaTest(true, GPU_GREATER, 0);
     blend_off();
-    C3D_TexBind(0, &sIdTex);
-    C3D_TexBind(1, &sIdTex);
+    C3D_TexBind(0, sIdCur);
+    C3D_TexBind(1, sIdCur);
     // (the edge colour: the table entry of the group most polygons on screen use is close enough
     // for one colour; HGSS sets them all alike)
     u16 ec = rd16(DS(0x04000330));
@@ -1629,6 +1653,146 @@ static int wide_stable(int want) {
     return state;
 }
 
+// ---------------------------------------------------------------- stereoscopic 3D
+// With the 3D slider up, the top screen is drawn once per eye: the 2D layers at the screen plane,
+// the 3D layer with a horizontal shift growing with depth, x += shift * (w - convergence). The
+// convergence is the nearest on-screen depth of the frame (smoothed): the nearest geometry sits
+// at the screen plane, the rest goes into the screen, as the 3DS's own games mostly do (and a
+// flat, orthographic scene, all at one w, stays flat). The right eye has its own 3D layer, ID image
+// and screen (citro3d clears every buffer at the frame's start, so nothing is shared): about
+// 2.3 MB of VRAM, there in 1:1 mode only (the fill mode's 2x targets take it).
+float port_stereo_force = -1;   // debug.txt "stereo X": the slider at X (0..1), for testing
+static int sStereoFail;         // (no VRAM: not tried again until the display mode changes)
+static float sShiftPx;          // the farthest depth's shift per eye, in screen pixels
+static float sConv, sFar;
+static int sFlat;        // (this frame's 3D is orthographic: no depth)
+static int sRangeFresh;  // (the next frame takes the depth range at once: stereo just came on)
+
+static void stereo_free(void) {
+    if (sTopR) { C3D_RenderTargetDelete(sTopR); sTopR = NULL; }
+    if (s3dTargetR) { C3D_RenderTargetDelete(s3dTargetR); s3dTargetR = NULL; C3D_TexDelete(&s3dTexR); }
+    if (sIdTargetR) { C3D_RenderTargetDelete(sIdTargetR); sIdTargetR = NULL; C3D_TexDelete(&sIdTexR); }
+    sStereoFail = 0;
+    if (sStereo) { sStereo = 0; gfxSet3D(false); }
+}
+
+static bool stereo_alloc(void) {
+    if (sTopR) return true;
+    if (sStereoFail || !s3dReady) return false;
+    sTopR = C3D_RenderTargetCreate(240, 400, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    if (sTopR && C3D_TexInitVRAM(&s3dTexR, 512, 256, GPU_RGBA8)) {
+        C3D_TexSetFilter(&s3dTexR, GPU_NEAREST, GPU_NEAREST);
+        s3dTargetR = C3D_RenderTargetCreateFromTex(&s3dTexR, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+        if (!s3dTargetR) C3D_TexDelete(&s3dTexR);
+    }
+    if (s3dTargetR && sIdTarget && C3D_TexInitVRAM(&sIdTexR, 512, 256, GPU_RGB8)) {
+        C3D_TexSetFilter(&sIdTexR, GPU_NEAREST, GPU_NEAREST);
+        C3D_TexSetWrap(&sIdTexR, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        sIdTargetR = C3D_RenderTargetCreateFromTex(&sIdTexR, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+        if (!sIdTargetR) C3D_TexDelete(&sIdTexR);
+    }
+    if (!sTopR || !s3dTargetR || (sIdTarget && !sIdTargetR)) {
+        port_log("gpu: no VRAM for the right eye (free %lu)\n", (unsigned long)vramSpaceFree());
+        stereo_free();
+        sStereoFail = 1;
+        return false;
+    }
+    C3D_RenderTargetSetOutput(sTopR, GFX_TOP, GFX_RIGHT, screen_transfer());
+    port_log("gpu: right eye ready (VRAM free %lu)\n", (unsigned long)vramSpaceFree());
+    return true;
+}
+
+// Whether this frame is drawn in stereo: the slider up, 1:1 mode, a 3D scene on the top screen
+// (held for a few frames before changing: the parallax barrier doesn't flicker through scene changes).
+static void stereo_decide(int scene3d) {
+    float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
+    int want = slider > 0.02f && sSS == 1 && scene3d;
+    static int count;
+    if (want == sStereo) count = 0;
+    else if (++count >= 4 || !want) {
+        count = 0;
+        if (want && !stereo_alloc()) want = 0;
+        if (want != sStereo) { sStereo = want; gfxSet3D(want); sRangeFresh = 1; }
+    }
+    sShiftPx = 3.5f * slider;  // (at the slider's top: 7 pixels between the eyes for the farthest)
+}
+
+// The frame's depth range: the nearest and farthest z/w among on-screen vertices, smoothed. The
+// parallax is linear in z/w (as a real pair of cameras' is, in 1/w), scaled to the range: the
+// nearest point at the screen plane, the farthest sShiftPx behind it, in a shallow scene (the
+// field's high camera) as in a deep one, as the 3DS's games set their cameras per scene. (An
+// orthographic scene, all at one w, stays flat: the battles', whose Pokémon stand on 2D platforms
+// that a depth would detach them from.)
+static void stereo_convergence(const G3Frame *f) {
+    float m = 2, M = -2, wm = 1e30f, wM = 0;
+    for (u32 i = 0; i < f->nv; i++) {
+        const G3Vtx *v = &f->v[i];
+        if (v->w > 0 && v->x <= v->w && -v->x <= v->w && v->y <= v->w && -v->y <= v->w && v->z <= v->w && -v->z <= v->w) {
+            float z = v->z / v->w;
+            if (z < m) m = z;
+            if (z > M) M = z;
+            if (v->w < wm) wm = v->w;
+            if (v->w > wM) wM = v->w;
+        }
+    }
+    if (m > M) return;
+    sFlat = wM - wm <= wM * 0.001f;  // (orthographic)
+    if (sRangeFresh) { sConv = m; sFar = M; sRangeFresh = 0; return; }
+    sConv += (m - sConv) * 0.2f;
+    sFar += (M - sFar) * 0.2f;
+}
+
+// One eye's 3D layer (eye: 0 mono, -1 left, 1 right) into its own target.
+static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw, float vh, u32 disp3d, u32 clear) {
+    C3D_RenderTarget *t = eye > 0 ? s3dTargetR : s3dTarget, *idt = eye > 0 ? sIdTargetR : sIdTarget;
+    int ca = (clear >> 16) & 31;
+    u32 cc = rgba((u16)(clear & 0x7FFF), (u8)(ca << 3 | ca >> 2));
+    // (per unit of z/w, in clip x of this viewport: the farthest point, at sFar, gets sShiftPx)
+    float range = sFar - sConv;
+    if (range < 1e-4f) range = 1e-4f;
+    float shift = eye && !sFlat ? eye * sShiftPx * 2.0f / vw / range : 0.0f;
+    C3D_RenderTargetClear(t, C3D_CLEAR_ALL, cc, 0);
+    C3D_FrameDrawOn(t);
+    C3D_BindProgram(&sProg3d);
+    attrs_3d(f);
+    // (C3D_FrameDrawOn resets the viewport to the whole target: set again after each switch)
+    const u32 vpx = (u32)(vx + 0.5f), vpy = (u32)(vy + 0.5f), vpw = (u32)(vw + 0.5f), vph = (u32)(vh + 0.5f);
+    C3D_SetViewport(vpx, vpy, vpw, vph);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);  // (y flipped: see render3d)
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
+    C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
+    C3D_CullFace(GPU_CULL_NONE);
+    sIdCur = eye > 0 ? &sIdTexR : &sIdTex;
+    draw_polys(f, 0, disp3d);
+    if ((disp3d & 0x20) && idt && port_edge_mode) {
+        // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
+        // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
+        int ida = (clear >> 24) & 63;
+        C3D_RenderTargetClear(idt, C3D_CLEAR_ALL, (u32)(ida * 4) << 16, 0);  // (the target's own format: RGB8, R in bits 16-23)
+        C3D_FrameDrawOn(idt);
+        C3D_SetViewport(vpx, vpy, vpw, vph);
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+        u64 tid = svcGetSystemTick();
+        C3D_BindProgram(&sProgId);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
+        draw_ids(f, disp3d, 0);
+        // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
+        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
+        draw_ids(f, disp3d, 1);
+        gProf3dIds += svcGetSystemTick() - tid;
+        C3D_FrameDrawOn(t);
+        draw_edges();
+        C3D_BindProgram(&sProg3d);
+        attrs_3d(f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+        C3D_SetViewport(vpx, vpy, vpw, vph);
+    }
+    draw_polys(f, 1, disp3d);
+}
+
 static void render3d(int screenW) {
     const G3Frame *f = port_g3_frame();
     layout(screenW);
@@ -1640,13 +1804,7 @@ static void render3d(int screenW) {
     sFrameNo++;
     u32 disp3d = *(volatile u16 *)DS(0x04000060);
     u32 clear = *(volatile u32 *)DS(0x04000350);
-    int ca = (clear >> 16) & 31;
-    u32 cc = rgba((u16)(clear & 0x7FFF), (u8)(ca << 3 | ca >> 2));
-    C3D_RenderTargetClear(s3dTarget, C3D_CLEAR_ALL, cc, 0);
-    C3D_FrameDrawOn(s3dTarget);
     GSPGPU_FlushDataCache(f->v, f->nv * sizeof(G3Vtx));  // (written by the CPU; read by the GPU)
-    C3D_BindProgram(&sProg3d);
-    attrs_3d(f);
     // the DS viewport (x1, y1 from the bottom, x2, y2) on the 256x192 picture. (Measured with a test
     // square: the render target's viewport y counts from the picture's top, and its y axis points
     // down, so vertices go in with y negated.)
@@ -1655,38 +1813,14 @@ static void render3d(int screenW) {
     float vx = (x1 - sL) * sScale, vy = (191 - y2 - sT) * sScale, vw = (x2 - x1 + 1) * sScale, vh = (y2 - y1 + 1) * sScale;
     sClipX = sClipY = 1.0f;
     if (sWide) { sClipX = vw / sScrW; sClipY = vh / 240; vx = vy = 0; vw = (float)sScrW; vh = 240; }
-    // (C3D_FrameDrawOn resets the viewport to the whole target: set again after each switch)
-    const u32 vpx = (u32)(vx + 0.5f), vpy = (u32)(vy + 0.5f), vpw = (u32)(vw + 0.5f), vph = (u32)(vh + 0.5f);
-    C3D_SetViewport(vpx, vpy, vpw, vph);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);  // (y flipped: see above)
-    C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
-    C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
-    C3D_CullFace(GPU_CULL_NONE);
-    draw_polys(f, 0, disp3d);
-    if ((disp3d & 0x20) && sIdTarget && port_edge_mode) {
-        // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
-        // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
-        int ida = (clear >> 24) & 63;
-        C3D_RenderTargetClear(sIdTarget, C3D_CLEAR_ALL, (u32)(ida * 4) << 16, 0);  // (the target's own format: RGB8, R in bits 16-23)
-        C3D_FrameDrawOn(sIdTarget);
-        C3D_SetViewport(vpx, vpy, vpw, vph);
-        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
-        u64 tid = svcGetSystemTick();
-        C3D_BindProgram(&sProgId);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
-        draw_ids(f, disp3d, 0);
-        // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
-        C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
-        draw_ids(f, disp3d, 1);
-        gProf3dIds += svcGetSystemTick() - tid;
-        C3D_FrameDrawOn(s3dTarget);
-        draw_edges();
-        C3D_BindProgram(&sProg3d);
-        attrs_3d(f);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
-        C3D_SetViewport(vpx, vpy, vpw, vph);
+    if (sStereo) {
+        stereo_convergence(f);
+        render3d_eye(f, -1, vx, vy, vw, vh, disp3d, clear);
+        render3d_eye(f, 1, vx, vy, vw, vh, disp3d, clear);
+    } else {
+        render3d_eye(f, 0, vx, vy, vw, vh, disp3d, clear);
     }
-    draw_polys(f, 1, disp3d);
+    sIdCur = &sIdTex;
     s3dHave = 1;
     // back to the 2D compositor's state
     C3D_BindProgram(&sProg);

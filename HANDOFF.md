@@ -35,10 +35,13 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    in debug.txt logs every write and the value it replaced.
 6. **Phase 3, sound**: done (see the table). Lesson: the game asks for volume 128, one past `SNDi_DecibelTable`; the DS reads 0 there, so
    `port/sdkfix.py` gives the table a trailing 0 (without it every channel ran at +229 dB).
-7. **Stereoscopic 3D** (wanted if it's simple and looks like current 3DS titles): draw the 3D
-   layer once per eye with a depth-dependent horizontal shift (x_clip += eye * sep * (w - conv),
-   from the slider: osGet3DSliderState), 2D layers at the screen plane; gfxSet3D and a right-eye
-   target. Mostly the overworld and battles.
+7. **Stereoscopic 3D**: done (`gpu2d.c`, "stereoscopic 3D"). With the slider up, in 1:1 mode, the
+   top screen is composed per eye: 2D at the screen plane, the 3D layer shifted by its z/w,
+   clamped to the frame's on-screen range (nearest at the screen, farthest 3.5 px per eye behind
+   at full slider); orthographic scenes (battles: 2D platforms) stay flat. The right eye needs
+   ~2.3 MB of VRAM, so not in the 1.25x fill mode. Cost: the 3D layer's command building twice
+   (+2.5 ms a frame in the field, Azahar's timing); only with the slider up. `debug.txt`
+   `stereo X` sets the slider; dumps add `full_N_r` (the right eye).
 8. **Wipes in widened scenes**: 2D effects reaching the DS picture's edge (the encounter
    transition's stripes) aren't carried over the widened world's sides, as fulldex does.
 9. Smaller: threads (`OS_CreateThread` is fatal; overlays 13/112), soft reset is fatal, `.3dsx`

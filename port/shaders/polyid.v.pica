@@ -3,6 +3,7 @@
 ; nearer; A = B = 0 for translucent polygons, which only clear the edge flag).
 .fvec xform      ; (x scale, y scale (negative), 0, 0)
 .fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
+.fvec stereo     ; (eye shift, convergence z/w, depth range, 0): x/w += shift * clamp(z/w - convergence, 0, range) (stereoscopic 3D)
 .fvec idp        ; (ID * 4 / 255, A, B, 0)
 
 .constf consts(0.0, 0.5, 0.0, 1.0)
@@ -18,6 +19,13 @@
 .proc main
 	mul r0.x, xform.x, inpos.x
 	mul r0.y, xform.y, inpos.y
+	mul r1.z, stereo.y, inpos.w
+	add r1.y, inpos.z, -r1.z
+	mul r1.w, stereo.z, inpos.w
+	max r1.y, consts.z, r1.y
+	min r1.y, r1.w, r1.y
+	mul r1.y, stereo.x, r1.y
+	add r0.x, r0.x, r1.y
 	add r1.x, inpos.z, -inpos.w
 	mul r0.z, consts.y, r1.x
 	mov r0.w, inpos.w
