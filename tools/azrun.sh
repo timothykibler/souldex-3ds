@@ -4,6 +4,7 @@
 #   AZAHAR=/path/Azahar.app tools/azrun.sh <frame> [timeout_s] < debug-lines
 # e.g. printf 'dump 300\n' | tools/azrun.sh 2100 120
 set -e
+# (stops early on a crash: Azahar's exception dump, a FATAL in the game's log, or Azahar exiting)
 FRAME=$(printf '%05d' "$1"); TIMEOUT=${2:-120}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 AZ="$HOME/Library/Application Support/Azahar"
@@ -21,7 +22,23 @@ TMP=$(mktemp -d)/game.elf
 cp "$ROOT/build-3ds/soulsilver.elf" "$TMP"
 open -n -a "$AZAHAR" --args -w "$TMP"
 t=0
-while [ ! -f "$SD/shot_$FRAME.bmp" ] && [ $t -lt "$TIMEOUT" ]; do sleep 2; t=$((t + 2)); if grep -aq FATAL "$SD/log.txt" 2>/dev/null; then break; fi; done
+AZLOG="$AZ/log/azahar_log.txt"  # (Azahar starts it afresh at each launch; a crash dumps registers there)
+sleep 3
+CRASH=
+while [ ! -f "$SD/shot_$FRAME.bmp" ] && [ $t -lt "$TIMEOUT" ]; do
+  sleep 1; t=$((t + 1))
+  if grep -aq FATAL "$SD/log.txt" 2>/dev/null; then break; fi
+  if grep -aq "Exception Type" "$AZLOG" 2>/dev/null; then CRASH=1; break; fi
+  if ! pgrep -f "MacOS/azahar" >/dev/null; then echo "azrun: Azahar exited"; break; fi
+done
+if [ -n "$CRASH" ]; then
+  echo "azrun: CRASH after ${t}s: $(grep -a "Exception Type" "$AZLOG" | tail -1)"
+  PC=$(grep -a " PC " "$AZLOG" | tail -1 | sed -E 's/.*PC +(0x[0-9A-Fa-f]+).*/\1/')
+  LR=$(grep -a " LR " "$AZLOG" | tail -1 | sed -E 's/.*LR +(0x[0-9A-Fa-f]+).*/\1/')
+  echo "azrun: PC $PC LR $LR:"
+  docker run --rm -v "$ROOT":/w -w /w ss3ds-dev /opt/devkitpro/devkitARM/bin/arm-none-eabi-addr2line -f -i -p -e build-3ds/soulsilver.elf "$PC" "$LR" 2>/dev/null | sed 's/^/  /'
+  echo "azrun: last game log lines:"; tail -4 "$SD/log.txt" | sed 's/^/  /'
+fi
 sleep 2
 pkill -9 -f "MacOS/azahar" 2>/dev/null || true
 OUT="$ROOT/captures/run"; rm -rf "$OUT"; mkdir -p "$OUT"

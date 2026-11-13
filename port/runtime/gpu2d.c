@@ -36,6 +36,7 @@ static C3D_RenderTarget *sTop, *sBottom, *sTopR;  // (sTopR: the top screen's ri
 static int sStereo;  // this frame draws two eyes (stereoscopic 3D, below)
 static int sRepeat;  // composing the top screen again (right eye): this frame's planes and sprites as they are
 static void stereo_decide(int scene3d);
+extern int port_stereo_enabled;
 
 // ---------------------------------------------------------------- vertices
 typedef struct { float x, y, u, v; } Vtx;
@@ -610,12 +611,15 @@ static C3D_Tex s3dTex;
 static C3D_Tex sIdTex;                 // edge marking's polygon-ID image (see the 3D layer)
 static C3D_RenderTarget *sIdTarget;
 static int s3dHave;
+static int s3dReady;
 // Stereoscopic 3D: the right eye's 3D layer and ID image, and which ones the compositor uses
 static C3D_Tex s3dTexR, sIdTexR;
 static C3D_Tex *s3dCur = &s3dTex, *sIdCur = &sIdTex;
 static void render3d(int screenW);
 static void flush_edge_vertices(void);
 static bool init3d(void);
+static bool alloc3d(void);
+static void free3d(void);
 
 static void bg_quads(void *arg) {
     BgDraw *d = arg;
@@ -874,7 +878,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     for (int bg = 0; bg < 4; bg++) {
         if (!(e->dispcnt & (0x100 << bg))) continue;
         if (bg == 0 && e->main && (e->dispcnt & 8)) {  // the 3D layer
-            if (!s3dHave) continue;
+            if (!s3dHave || !s3dReady) continue;
             bgd[0] = (BgDraw){ e, 0, NULL, 3 };
             on[0] = 1;
             continue;
@@ -952,14 +956,35 @@ static u32 screen_transfer(void) {
 // The screens' render targets at a supersampling factor (made again when the display mode
 // changes: VRAM holds one size at a time).
 static void stereo_free(void);
+static bool make_targets_(int ss);
+static int s3dReadyAtStart;
+// The screens' targets at a supersampling factor, and everything else in VRAM made again after
+// them (the 3D layer; the right eye comes back when wanted), so the layout is always the one
+// start-up has, whatever the order of mode changes. If the 2x targets don't fit: 1:1.
 static bool make_targets(int ss) {
-    stereo_free();  // (its VRAM: the larger targets may need it)
-    if (sTop) C3D_RenderTargetDelete(sTop);
-    if (sBottom) C3D_RenderTargetDelete(sBottom);
+    stereo_free();
+    free3d();
+    bool ok = make_targets_(ss);
+    if (!ok && ss == 2) {
+        port_log("gpu: no VRAM for fill mode: back to 1:1\n");
+        port_display_fill = 0;
+        ok = make_targets_(1);
+    }
+    if (s3dReadyAtStart && !alloc3d()) { port_log("gpu: no VRAM for the 3D layer\n"); s3dReady = 0; }
+    return ok;
+}
+static bool make_targets_(int ss) {
+    if (sTop) { C3D_RenderTargetDelete(sTop); sTop = NULL; }
+    if (sBottom) { C3D_RenderTargetDelete(sBottom); sBottom = NULL; }
     sSS = ss;
     sTop = C3D_RenderTargetCreate(240 * ss, 400 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
     sBottom = C3D_RenderTargetCreate(240 * ss, 320 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
-    if (!sTop || !sBottom) { port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree()); return false; }
+    if (!sTop || !sBottom) {
+        port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree());
+        if (sTop) { C3D_RenderTargetDelete(sTop); sTop = NULL; }
+        if (sBottom) { C3D_RenderTargetDelete(sBottom); sBottom = NULL; }
+        return false;
+    }
     C3D_RenderTargetSetOutput(sTop, GFX_TOP, GFX_LEFT, screen_transfer());
     C3D_RenderTargetSetOutput(sBottom, GFX_BOTTOM, GFX_LEFT, screen_transfer());
     return true;
@@ -988,8 +1013,9 @@ bool port_gpu2d_init(void) {
     // (the screens at twice their size, 24-bit colour: 16-bit rounds each blend step, and layered
     // blends drift from the DS's. Each has its own depth-stencil buffer: citro3d clears every
     // buffer at the frame's start, so a shared one would reach the second screen used.)
-    if (!make_targets(2)) return false;  // (the larger size first: the 3D layer's targets come after)
+    if (!make_targets_(2)) return false;  // (the larger size first: the 3D layer's targets come after)
     if (!init3d()) port_log("gpu: no 3D layer\n");
+    s3dReadyAtStart = s3dReady;
     if (C3D_TexInit(&sShade, 64, 8, GPU_RGBA4)) {  // (black, alpha 0 -> about 60 % across)
         C3D_TexSetFilter(&sShade, GPU_LINEAR, GPU_LINEAR);
         C3D_TexSetWrap(&sShade, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
@@ -1026,13 +1052,22 @@ u32 gGpu2dRebuilds;   // BG textures rebuilt
 
 void port_gpu2d_frame(void) {
     if (!sReady) return;
+    if (!port_stereo_enabled && (sTopR || sStereo)) {  // (stereo switched off: the right eye's VRAM back, outside a frame, the GPU done with it)
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C3D_FrameEnd(0);
+        C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+        C3D_FrameEnd(0);
+        stereo_free();
+    }
     if ((port_display_scaled() ? 2 : 1) != sSS) {  // (the display mode changed: targets of the other size)
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);  // (the GPU done with the old ones)
         C3D_FrameEnd(0);
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C3D_FrameEnd(0);
-        make_targets(port_display_scaled() ? 2 : 1);
+        if (!make_targets(port_display_scaled() ? 2 : 1)) { port_log("gpu: no screen targets at all\n"); sReady = false; return; }
     }
+    // (before the frame: citro3d makes and deletes render targets only outside one)
+    stereo_decide(((rd16(DS(0x04000304)) >> 15) & 1) && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     u64 tw = svcGetSystemTick();
     C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
     u64 t0 = svcGetSystemTick();
@@ -1043,7 +1078,6 @@ void port_gpu2d_frame(void) {
     a = (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
-    stereo_decide(a_on_top && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     { u64 t = svcGetSystemTick(); render3d(a_on_top ? 400 : 320); gProf3d += svcGetSystemTick() - t; }
     C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0, 0);  // (0: black in any colour format)
     C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0, 0);
@@ -1180,7 +1214,7 @@ static C3D_RenderTarget *s3dTarget, *s3dTargetR, *sIdTargetR;
 // drawn into its own image against the 3D layer's depth buffer.
 typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
 static VE *sVboEdge;
-static int s3dReady;
+
 static void flush_edge_vertices(void) { if (sVboEdge) GSPGPU_FlushDataCache(sVboEdge, sizeof(VE) * 6 * 8); }
 
 
@@ -1220,22 +1254,36 @@ static bool init3d(void) {
     sLocTcId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "tcscale");
     sLocIdp = shaderInstanceGetUniformLocation(sProgId.vertexShader, "idp");
     sLocStereoId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "stereo");
-    if (!C3D_TexInitVRAM(&s3dTex, 512, 256, GPU_RGBA8)) return false;
-    C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
-    s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
-    if (!s3dTarget) return false;
     sDvlbEdge = DVLB_ParseFile((u32 *)edge_shbin, edge_shbin_size);
     shaderProgramInit(&sProgEdge);
     shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
     sVboEdge = linearAlloc(sizeof(VE) * 6 * 8);
+    if (!alloc3d()) return false;
+    s3dReady = 1;
+    return true;
+}
+
+// The 3D layer's VRAM: its image and the edge marking's ID image, with their depth buffers.
+// (Freed and made again whenever the display mode changes, after the screens' targets: VRAM is
+// then laid out as at start-up, never fragmented by the change.)
+static void free3d(void) {
+    if (sIdTarget) { C3D_RenderTargetDelete(sIdTarget); sIdTarget = NULL; C3D_TexDelete(&sIdTex); }
+    if (s3dTarget) { C3D_RenderTargetDelete(s3dTarget); s3dTarget = NULL; C3D_TexDelete(&s3dTex); }
+}
+
+static bool alloc3d(void) {
+    if (!C3D_TexInitVRAM(&s3dTex, 512, 256, GPU_RGBA8)) return false;
+    C3D_TexSetFilter(&s3dTex, GPU_NEAREST, GPU_NEAREST);
+    s3dTarget = C3D_RenderTargetCreateFromTex(&s3dTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+    if (!s3dTarget) { C3D_TexDelete(&s3dTex); return false; }
     if (sVboEdge && C3D_TexInitVRAM(&sIdTex, 512, 256, GPU_RGB8)) {  // (ID and depth: no alpha)
         C3D_TexSetFilter(&sIdTex, GPU_NEAREST, GPU_NEAREST);
         C3D_TexSetWrap(&sIdTex, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
         // (its own depth buffer: an "equal" test against the 3D pass's fails on alternate
         // columns, the PICA doesn't reproduce depths bit for bit between passes)
         sIdTarget = C3D_RenderTargetCreateFromTex(&sIdTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
+        if (!sIdTarget) C3D_TexDelete(&sIdTex);
     }
-    s3dReady = 1;
     return true;
 }
 
@@ -1713,10 +1761,7 @@ static bool stereo_alloc(void) {
 // (held for a few frames before changing: the parallax barrier doesn't flicker through scene changes).
 static void stereo_decide(int scene3d) {
     float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
-    if (!port_stereo_enabled) {  // (switched off: its VRAM back; C3D_FrameBegin has waited for the GPU)
-        if (sTopR || sStereo) stereo_free();
-        return;
-    }
+    if (!port_stereo_enabled) return;  // (its VRAM is given back before the frame: port_gpu2d_frame)
     int want = slider > 0.02f && sSS == 1 && scene3d;
     static int count;
     if (want == sStereo) count = 0;

@@ -14,11 +14,14 @@
 static FILE *gLog;
 uint32_t port_trace3d;
 
+int port_log_screen = 1;  // (on the bottom screen until the GPU has it: then the file only)
 void port_log(const char *fmt, ...) {
     va_list ap;
-    va_start(ap, fmt);
-    vprintf(fmt, ap);
-    va_end(ap);
+    if (port_log_screen) {
+        va_start(ap, fmt);
+        vprintf(fmt, ap);
+        va_end(ap);
+    }
     if (gLog) {
         va_start(ap, fmt);
         vfprintf(gLog, fmt, ap);
@@ -71,6 +74,7 @@ int main(void) {
     port_log("SoulSilver 3DS (phase 1)\n");
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
+    port_log_screen = 0;  // (the console would draw over the GPU's bottom screen, in the wrong format: static)
 
     if (!port_ds_mem_init()) port_fatal("could not set up the DS memory window");
     if (!port_rom_open()) port_fatal("no SoulSilver ROM: put it at " PORT_DIR "/soulsilver.nds");
@@ -89,6 +93,7 @@ int main(void) {
                 extern int port_snd_wavdump;
                 port_snd_wavdump = sscanf(line, "wavdump %u", &n) == 1 ? (int)n + 1 : 1;
             }
+            else if (sscanf(line, "menu %u", &n) == 1) { void port_cheats_script(uint32_t f, const char *k); const char *k = strchr(line + 5, ' '); if (k) port_cheats_script(n, k + 1); }
             else if (!strncmp(line, "stereo ", 7)) { extern float port_stereo_force; float v; if (sscanf(line + 7, "%f", &v) == 1) port_stereo_force = v; }
             else if (sscanf(line, "strmtest %u", &n) == 1) { extern int port_strmtest_frame_no; port_strmtest_frame_no = (int)n; }
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }

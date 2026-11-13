@@ -348,6 +348,34 @@ static void draw_menu(int cur, int top) {
     }
 }
 
+// (debug.txt "menu F KEYS": at frame F the menu opens and is fed KEYS, comma-separated, one every
+// 8 frames, as if pressed: A, B, UP, DOWN, LEFT, RIGHT. For testing it in an emulator.)
+// (several such lines: a menu session each)
+static u32 sScriptFrame[8], sScriptKeys[8][64];
+static int sScriptLen[8], sScripts, sScriptPos, sScripted, sCurScript;
+void port_cheats_script(u32 frame, const char *keys) {
+    if (sScripts >= 8) return;
+    int n = sScripts++;
+    static const struct { const char *n; u32 k; } names[] = { { "A", KEY_A }, { "B", KEY_B }, { "UP", KEY_UP }, { "DOWN", KEY_DOWN }, { "LEFT", KEY_LEFT }, { "RIGHT", KEY_RIGHT } };
+    sScriptFrame[n] = frame;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", keys);
+    for (char *t = strtok(buf, ",\n\r "); t && sScriptLen[n] < 64; t = strtok(NULL, ",\n\r "))
+        for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++)
+            if (!strcmp(t, names[i].n)) sScriptKeys[n][sScriptLen[n]++] = names[i].k;
+}
+static void scan(u32 *held, u32 *down) {
+    hidScanInput();
+    *held = hidKeysHeld();
+    *down = hidKeysDownRepeat();
+    if (!sScripted) return;
+    static int tick;
+    *held = *down = 0;
+    if (++tick % 8) return;
+    if (sScriptPos < sScriptLen[sCurScript]) { *down = sScriptKeys[sCurScript][sScriptPos]; port_log("menu: key %d of %d\n", sScriptPos + 1, sScriptLen[sCurScript]); sScriptPos++; }
+    else *down = KEY_B;
+}
+
 static int menu_keys(u32 held) {
     return (held & (KEY_ZL | KEY_ZR)) == (KEY_ZL | KEY_ZR) || (held & (KEY_L | KEY_R | KEY_SELECT)) == (KEY_L | KEY_R | KEY_SELECT);
 }
@@ -355,19 +383,19 @@ static int menu_keys(u32 held) {
 static void menu(void) {
     void port_gpu2d_bottom_console(int console);
     port_gpu2d_bottom_console(1);
-    PrintConsole con;
+    static PrintConsole con;  // (static: it stays the console after the menu, for the log; on the stack it was a crash in the next printf)
     consoleInit(GFX_BOTTOM, &con);
     build_rows();
     int cur = 0, top = 0, changed = 0, redraw = 1;
+    u32 held, down;
     while (aptMainLoop()) {  // (wait for the keys that opened it to be let go)
-        hidScanInput();
-        if (!menu_keys(hidKeysHeld())) break;
+        scan(&held, &down);
+        if (!menu_keys(held)) break;
         gspWaitForVBlank();
     }
     while (aptMainLoop()) {
-        hidScanInput();
-        u32 down = hidKeysDownRepeat();
-        if ((down & KEY_B) || menu_keys(hidKeysHeld()) || (down & KEY_START)) break;
+        scan(&held, &down);
+        if ((down & KEY_B) || menu_keys(held) || (down & KEY_START)) break;
         if (down & KEY_DOWN) { if (cur + 1 < sNumRows) cur++; redraw = 1; }
         if (down & KEY_UP) { if (cur > 0) cur--; redraw = 1; }
         if (down & KEY_RIGHT) { cur += 13; if (cur >= sNumRows) cur = sNumRows - 1; redraw = 1; }
@@ -397,8 +425,8 @@ static void menu(void) {
         gspWaitForVBlank();
     }
     while (aptMainLoop()) {  // (and for the keys that closed it, so the game doesn't see them)
-        hidScanInput();
-        if (!(hidKeysHeld() & (KEY_B | KEY_START | KEY_ZL | KEY_ZR | KEY_L | KEY_R | KEY_SELECT))) break;
+        scan(&held, &down);
+        if (!(held & (KEY_B | KEY_START | KEY_ZL | KEY_ZR | KEY_L | KEY_R | KEY_SELECT))) break;
         gspWaitForVBlank();
     }
     if (changed) save_choices();
@@ -408,6 +436,9 @@ static void menu(void) {
 
 // Once a frame (port_frame, after the input): the menu if asked for, then the codes.
 void port_cheats_frame(void) {
+    extern volatile uint32_t port_frame_count;
+    for (int i = 0; i < sScripts; i++)
+        if (port_frame_count == sScriptFrame[i]) { sCurScript = i; sScriptPos = 0; sScripted = 1; menu(); sScripted = 0; port_log("menu: closed (frame %lu)\n", (unsigned long)port_frame_count); }
     if (menu_keys(hidKeysHeld())) menu();
     run_cheats();
 }
