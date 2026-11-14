@@ -109,6 +109,14 @@ def compile_runtime():
         with open(f"{B}/gen/{sh}_shbin.s", "w") as f:
             run(["/opt/devkitpro/tools/bin/bin2s", f"{B}/gen/{sh}.shbin"], stdout=f)
     srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s", f"{B}/gen/polyid_shbin.s"]
+    # the build's ID (commit + time), logged at start-up and kept with a copy of the ELF
+    # (port/package.sh: build-3ds/elves/), so a crash dump can be matched to its exact program
+    head = open(f"{ROOT}/.git/HEAD").read().strip()
+    sha = open(f"{ROOT}/.git/" + head[5:]).read().strip() if head.startswith("ref: ") and os.path.exists(f"{ROOT}/.git/" + head[5:]) else head
+    import time
+    build_id = f"{sha[:7]}-{time.strftime('%Y%m%d-%H%M%S')}"
+    os.makedirs(f"{B}/gen", exist_ok=True)
+    open(f"{B}/gen/build_id.txt", "w").write(build_id + "\n")
     objs = []
     for s in srcs:
         o = f"{out}/{os.path.basename(s)}.o"
@@ -118,6 +126,8 @@ def compile_runtime():
             uses_ctru = "<3ds.h>" in open(s).read()
             cmd = [CC, "-c"] + cg.CFLAGS + ["-w", f"-I{ROOT}/port/runtime"]
             cmd += (["-I/opt/devkitpro/libctru/include", "-D__3DS__", f"-I{ROOT}/port/include"] if uses_ctru else flags)
+            if s.endswith("main.c"):
+                cmd += [f'-DPORT_BUILD_ID="{build_id}"']
             cmd += [s, "-o", o]
         run(cmd)
         objs.append(o)

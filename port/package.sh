@@ -33,4 +33,9 @@ docker run --rm -v "$PWD":/w "${ROMARG[@]}" -w /w/build-3ds ss3ds-cia sh -c '
   arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf 2>/dev/null || /opt/devkitpro/devkitARM/bin/arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf
   makerom -f cia -o soulsilver.cia -rsf /w/port/cia.rsf -target t -exefslogo -elf soulsilver-stripped.elf -icon soulsilver.smdh -banner soulsilver.bnr
 '
+# (the ELF kept under the build's ID, which the game logs at start-up: crash dumps resolve against it)
+if [ -f build-3ds/gen/build_id.txt ]; then
+  mkdir -p build-3ds/elves && cp build-3ds/soulsilver.elf "build-3ds/elves/$(cat build-3ds/gen/build_id.txt).elf"
+  echo "package: build $(cat build-3ds/gen/build_id.txt)"
+fi
 ls -la build-3ds/soulsilver.cia

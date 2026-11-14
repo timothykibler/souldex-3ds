@@ -71,7 +71,10 @@ int main(void) {
     mkdir("sdmc:/3ds", 0777);
     mkdir(PORT_DIR, 0777);
     gLog = fopen(PORT_DIR "/log.txt", "w");
-    port_log("SoulSilver 3DS (phase 1)\n");
+#ifndef PORT_BUILD_ID
+#define PORT_BUILD_ID "unknown"
+#endif
+    port_log("SoulSilver 3DS, build %s\n", PORT_BUILD_ID);  // (build-3ds/elves/<this>.elf is its program: for crash dumps)
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
     port_log_screen = 0;  // (the console would draw over the GPU's bottom screen, in the wrong format: static)
