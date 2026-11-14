@@ -69,6 +69,21 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    packing, H-blank DMA effects, mosaic, bitmap sprites, microphone, RTC uses UTC, VRAM bank
    remapping isn't modelled (each window is its own memory; a first attempt broke battles).
 
+## Hardware-only bugs, and catching them in Azahar
+
+The 3DS faults on bad addresses that Azahar quietly tolerates, but Azahar logs each one
+("unmapped Read32 @ ... at PC ..."), and `tools/azrun.sh` now prints their count after every run:
+anything non-zero is a hardware crash waiting (resolve the PC against build-3ds/soulsilver.elf).
+Classes found and fixed so far:
+- DS addresses the port didn't move: data words (mwasm2gas), Thumb `mov`+`lsl` constants (three
+  rules in mwasm2gas: same register, derived register, I/O base), and the SDK's sound command
+  packing sample addresses into 27 bits (snd_channel_port.c restores them).
+- Calls into memory several overlays share (7, 8 and 10 at 0x0221BE20): the decomp names one
+  occupant, the DS runs whichever is loaded. port/ovdispatch.py generates trampolines for the 360
+  such targets, dispatched by runtime/overlay.c to the loaded overlay (logged: "ovdispatch:").
+- Known leftover: code deriving values from a moved I/O address (overlay 7: `lsr r1, r0, #13` of
+  WINOUT's address) gets different bits than on the DS.
+
 ## Testing on a 3DS without the SD card
 
 - Install over Wi-Fi: FBI -> Remote Install -> Receive URLs over the network, then

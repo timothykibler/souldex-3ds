@@ -108,7 +108,12 @@ def compile_runtime():
         run(["/opt/devkitpro/tools/bin/picasso", "-o", f"{B}/gen/{sh}.shbin", f"{ROOT}/port/shaders/{sh}.v.pica"])
         with open(f"{B}/gen/{sh}_shbin.s", "w") as f:
             run(["/opt/devkitpro/tools/bin/bin2s", f"{B}/gen/{sh}.shbin"], stdout=f)
-    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s", f"{B}/gen/polyid_shbin.s"]
+    # calls into memory several overlays share, dispatched to the one loaded (port/ovdispatch.py)
+    global OVDISPATCH_WRAPS
+    sys.path.insert(0, f"{ROOT}/port")
+    import ovdispatch
+    OVDISPATCH_WRAPS = ovdispatch.generate(f"{B}/obj", f"{B}/gen/ovdispatch.c")
+    srcs = glob.glob(f"{ROOT}/port/runtime/*.c") + glob.glob(f"{ROOT}/port/runtime/*.S") + [f"{B}/gen/overlays.c", f"{B}/gen/ovdispatch.c", f"{B}/gen/quad_shbin.s", f"{B}/gen/poly_shbin.s", f"{B}/gen/edge_shbin.s", f"{B}/gen/polyid_shbin.s"]
     # the build's ID (commit + time), logged at start-up and kept with a copy of the ELF
     # (port/package.sh: build-3ds/elves/), so a crash dump can be matched to its exact program
     head = open(f"{ROOT}/.git/HEAD").read().strip()
@@ -151,10 +156,14 @@ def archives():
     return libs
 
 
+OVDISPATCH_WRAPS = []
+
+
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
            "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx",
+           ] + [f"-Wl,--wrap={w}" for w in OVDISPATCH_WRAPS] + [
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]
     return subprocess.run(cmd, capture_output=True, text=True), elf

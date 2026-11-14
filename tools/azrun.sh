@@ -45,3 +45,7 @@ OUT="$ROOT/captures/run"; rm -rf "$OUT"; mkdir -p "$OUT"
 for f in "$SD"/shot_*.bmp "$SD"/full_*.bmp; do [ -f "$f" ] && sips -s format png "$f" --out "$OUT/$(basename "${f%.bmp}").png" >/dev/null; done
 ls "$OUT"
 grep -aE "FATAL|fps|differ|wide" "$SD/log.txt" | tail -15
+# (bad addresses: a crash on hardware, only a logged unmapped access in Azahar)
+N=$(grep -a -ic "unmapped" "$AZ/log/azahar_log.txt" 2>/dev/null || true)
+echo "azrun: unmapped memory accesses: ${N:-0}"
+[ "${N:-0}" != "0" ] && grep -a -i "unmapped" "$AZ/log/azahar_log.txt" | head -3

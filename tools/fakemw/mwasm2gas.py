@@ -117,6 +117,7 @@ def convert(text, move_ds_addresses=False, phase=None):
     if move_ds_addresses:
         _move_io_base_immediates(lines)
         _move_mem_immediates(lines)
+        _move_derived_immediates(lines)
     return "\n".join(lines) + "\n"
 
 
@@ -175,6 +176,57 @@ def _move_mem_immediates(lines):
         if address:
             k, mm = mov
             lines[k] = f"{mm.group(1)}{mm.group(2)}{mm.group(3)}{hex(moved >> sh)}"
+
+
+def _move_derived_immediates(lines):
+    """A DS I/O, palette, VRAM or OAM address built from another register's constant: `mov rS,
+    #imm` (rS also used as itself) ... `lsl rD, rS, #sh` (rD != rS), e.g. 0x20 << 21 = 0x04000000.
+    The mov can't change; where rD is then used as an address (a load/store base, address maths,
+    a memory function's argument), the lsl becomes `mov rD, #imm2` + `lsl rD, rD, #sh2` making
+    the moved address (+ PORT_DS_DELTA). Two bytes longer: the assembler places what follows."""
+    out = []
+    for i, l in enumerate(lines):
+        m = _LSL_IMM.match(l)
+        new = None
+        if m and m.group(1) != m.group(2):
+            dst, src, sh = m.group(1), m.group(2), int(m.group(3), 0)
+            value = None
+            for k in range(1, 7):
+                if i - k < 0:
+                    break
+                mm = _MOV_IMM.match(lines[i - k])
+                if mm and mm.group(2) == src:
+                    value = int(mm.group(4), 0) << sh
+                    break
+                if re.match(rf"\s*\w+\s+{src}\b", lines[i - k]) and not re.match(rf"\s*(str|cmp|tst)", lines[i - k].strip()):
+                    break  # (src redefined)
+            if value is not None and 0x04000000 <= value < 0x07000800:
+                address = False
+                for k in range(1, 9):
+                    if i + k >= len(lines):
+                        break
+                    t = lines[i + k].strip()
+                    if re.search(rf"\[{dst}\b", t) or re.match(rf"(add|sub)s?\s+\w+,\s*{dst}\b|(add|sub)s?\s+{dst},", t):
+                        address = True
+                        break
+                    b = re.match(r"blx?\s+(\w+)", t)
+                    if b:
+                        address = dst in ("r0", "r1", "r2", "r3") and bool(_MEM_FUNC.match(b.group(1)))
+                        break
+                    if re.match(rf"\w+\s+{dst}\b", t):
+                        break
+                if address:
+                    moved = value + 0x08000000
+                    for s2 in range(0, 32):
+                        if moved % (1 << s2) == 0 and (moved >> s2) <= 255 and (moved >> s2) == moved / (1 << s2):
+                            pass
+                    s2 = max(k for k in range(0, 32) if moved % (1 << k) == 0)
+                    imm = moved >> s2
+                    if imm <= 255:
+                        ind = re.match(r"^(\s*)", l).group(1)
+                        new = f"{ind}mov {dst}, #{hex(imm)}\n{ind}lsl {dst}, {dst}, #{hex(s2)}"
+        out.append(new if new else l)
+    lines[:] = out
 
 
 def _move_io_base_immediates(lines):
