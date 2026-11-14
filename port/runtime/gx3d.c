@@ -117,7 +117,9 @@ static void frames_init(void) {
 
 static int alpha_of(u32 attr) { return (attr >> 16) & 31; }
 
+int port_g3_prof;  // (debug.txt "g3prof N", timing by ablation: 1 no polygon assembly, 2 no vertex work, 3 decode only)
 static void emit_triangles(const G3Vtx *v, int n) {
+    if (port_g3_prof == 1) return;
     // n = 3 (triangle) or 4 (quad, as two triangles)
     G3Frame *f = &sFrames[sBuild];
     if (!f->v) return;
@@ -169,7 +171,7 @@ static void emit_triangles(const G3Vtx *v, int n) {
 
 static void add_vertex(s32 x, s32 y, s32 z) {
     sVx = x; sVy = y; sVz = z;
-    if (sPrim < 0) return;
+    if (sPrim < 0 || port_g3_prof == 2) return;
     if (sClipDirty) update_clip();
     G3Vtx v;
     // (in float: what the GPU draws needn't match the DS's fixed point to the last bit, and the
@@ -312,7 +314,16 @@ static void run(u8 cmd, const u32 *p) {
         for (int i = 0; i < n && i < 16; i++) port_log(" %08lX", (unsigned long)p[i]);
         port_log("\n");
     }
+    if (port_g3_prof == 3) return;
     run_cmd(cmd, p);
+}
+void port_g3_hist_report(void) {  // (the command mix since the last report, per frame)
+    u32 tot = 0;
+    for (int i = 0; i < 128; i++) tot += sHist[i];
+    port_log("  g3 commands per frame: %lu;", (unsigned long)(tot / 600));
+    for (int i = 0; i < 128; i++) if (sHist[i] / 600 >= 20) port_log(" %02X:%lu", i, (unsigned long)(sHist[i] / 600));
+    port_log("\n");
+    memset(sHist, 0, sizeof(sHist));
 }
 
 int __real_G3X_GetClipMtx(void *m);
@@ -498,8 +509,39 @@ uint64_t port_ctr_ticks(void);
 void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
     (void)dest;
     uint64_t t = port_ctr_ticks();
-    const u32 *s = src;
-    for (u32 i = 0; i < bytes / 4; i++) port_gx_fifo_write(s[i]);
+    init_once();
+    const u32 *s = src, *end = s + bytes / 4;
+    // (a packed command word still waiting for parameters: finished word by word first)
+    while (s < end && sFifoNCmd) port_gx_fifo_write(*s++);
+    // The rest decoded in place: each command word, then each of its commands run with its
+    // parameters where they lie (no call and no copy per word: decoding was 3 of the field's
+    // 8.4 ms in the geometry engine). A command whose parameters run past the end is left to
+    // port_gx_fifo_write, in the same state it would have reached word by word.
+    while (s < end) {
+        u32 word = *s++;
+        sFifoWords++;
+        u8 cmds[4] = { (u8)word, (u8)(word >> 8), (u8)(word >> 16), (u8)(word >> 24) };
+        int n = 4;
+        while (n > 0 && cmds[n - 1] == 0) n--;  // (trailing no-ops)
+        for (int i = 0; i < n; i++) {
+            u8 c = cmds[i];
+            int np = kParams[c];
+            if (np == 0) {
+                if (c) run(c, NULL);
+                continue;
+            }
+            if (end - s < np) {  // (its parameters continue in a later transfer)
+                memcpy(sFifoCmds, cmds, 4);
+                sFifoNCmd = n; sFifoCur = i; sFifoN = 0;
+                while (s < end) port_gx_fifo_write(*s++);
+                gG3Ticks += port_ctr_ticks() - t;
+                return;
+            }
+            run(c, s);
+            s += np;
+            sFifoWords += np;
+        }
+    }
     gG3Ticks += port_ctr_ticks() - t;
 }
 

@@ -21,9 +21,24 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
 ## Open items, in order
 
 1. **Hardware test** of the CIA (speed, and the cache flushes: the GPU path has only run in Azahar).
-2. **Overworld speed on an original 3DS**: run the frame building (BG planes, sprites, texture
-   decode, command lists) on the second core in parallel with the game, double-buffering what it
-   reads; and make the geometry engine's vertex path cheaper (strip assembly copies, texcoord maths).
+2. **Speed (shelved 2026-11-14; 60 fps in the overworld looks out of reach as things stand)**.
+   Plan when picked up: a **30 / 60 fps mode** setting. 30 fps (the default) keeps everything
+   (seam fill, edge marking, stereo); 60 fps turns off what costs per frame (seam fill, stereo,
+   possibly edge marking) and accepts its artifacts.
+   Field, Azahar timing, per frame: game code ~9.5 ms, of which the geometry engine (gx3d.c,
+   the DS 3D emulated on the CPU) ~8.4 ms; frame building ~8.4 ms (3D layer 5.7 ms with seam
+   fill, 4.3 without; BG planes 1.1 ms). The geometry engine by ablation (`debug.txt`
+   `g3prof N`: 1 no polygon assembly, 2 no vertex work, 3 decode only): polygon assembly 1.7 ms,
+   per-vertex work 1.3 ms, other commands (matrices, lighting, texcoords) 2.4 ms, and 3.0 ms
+   with commands decoded but not run. Decoding display lists in place (port_gx_fifo_send, no
+   per-word call or copy) changed nothing (8.38 ms either way), so those 3 ms aren't the
+   per-word plumbing: profile with finer tools before more guesses (the per-command counts
+   printed every 600 frames read 0: sHist is reset somewhere, unfixed).
+   Ideas: cache display lists whose content and state repeat (pspoke: outdoor 3D 19 -> 5 ms);
+   transform on the PICA instead of the CPU (as native games do: model-space vertices,
+   matrices as uniforms); frame building on the second core. A New 3DS runs the ARM11 at
+   804 MHz with L2 cache, roughly 3x Azahar's timing, so hardware numbers may differ a lot:
+   measure there first (the log prints this breakdown every 600 frames).
 3. **3D features not done**: anti-aliasing (DISP3DCNT bit 4, the field sets it), shadow polygons,
    wireframe, toon/highlight, fog, w-buffering, translucent Y-sorting, rear-plane, display capture.
    Edge marking uses one edge colour (HGSS sets all eight alike).
