@@ -1157,6 +1157,36 @@ void port_gpu2d_dump_full(u32 frame) {
                  rd16(DS(0x04000338)), rd16(DS(0x0400033A)), rd16(DS(0x0400033C)), rd16(DS(0x0400033E)));
         port_log("frame %lu: wide %d BGCNT %04X %04X %04X %04X DISPCNT %08lX DISP3DCNT %04X CLEAR %08lX vp %d,%d,%d,%d\n", (unsigned long)frame, sWide, rd16(DS(0x04000008)), rd16(DS(0x0400000A)), rd16(DS(0x0400000C)), rd16(DS(0x0400000E)), rd32(DS(0x04000000)),
                  *(volatile u16 *)DS(0x04000060), *(volatile u32 *)DS(0x04000350), g ? g->viewport[0] : -1, g ? g->viewport[1] : -1, g ? g->viewport[2] : -1, g ? g->viewport[3] : -1);
+        if (g) for (u32 k = 0; k < g->np && k < 4; k++) {
+            const G3Poly *q = &g->p[k]; const G3Vtx *v0 = &g->v[q->first];
+            port_log("  poly %lu: attr %08lX tex %08lX count %lu tr %d; v0 %.3f %.3f %.3f %.3f rgba %u %u %u %u\n", (unsigned long)k, (unsigned long)q->polyattr, (unsigned long)q->teximage, (unsigned long)q->count, q->translucent, v0->x, v0->y, v0->z, v0->w, v0->r, v0->g, v0->b, v0->a);
+        }
+        port_log("  swapbuffers/zbuf: DISP3DCNT %04X\n", *(volatile u16 *)DS(0x04000060));
+        port_log("frame %lu: 3D frame %s, %lu polygons, %lu vertices; engine A on %s\n", (unsigned long)frame, g ? "yes" : "none", (unsigned long)(g ? g->np : 0), (unsigned long)(g ? g->nv : 0), ((rd16(DS(0x04000304)) >> 15) & 1) ? "top" : "bottom");
+    }
+    {  // (the 3D layer as rendered, untiled: layer3d_N.bmp; alpha 0 as a grey checkerboard)
+        char p3[96];
+        snprintf(p3, sizeof(p3), "sdmc:/3ds/soulsilver-3ds/layer3d_%05lu.bmp", (unsigned long)frame);
+        FILE *f3 = s3dTex.data ? fopen(p3, "wb") : NULL;
+        if (f3) {
+            const int W3 = 512, H3 = 256, rb = W3 * 3, sz = 54 + rb * H3;
+            u8 hd3[54] = { 'B', 'M' };
+            hd3[2] = sz; hd3[3] = sz >> 8; hd3[4] = sz >> 16; hd3[10] = 54; hd3[14] = 40;
+            hd3[18] = W3 & 255; hd3[19] = W3 >> 8; hd3[22] = H3; hd3[23] = H3 >> 8; hd3[26] = 1; hd3[28] = 24;
+            fwrite(hd3, 1, 54, f3);
+            static u8 r3[512 * 3];
+            const u8 *t = s3dTex.data;
+            for (int y = 0; y < H3; y++) {  // (BMP rows bottom-up; the render target's rows are bottom-up too)
+                for (int x = 0; x < W3; x++) {
+                    int i = (((y >> 3) * (W3 >> 3) + (x >> 3)) * 64 + sMorton[(y & 7) * 8 + (x & 7)]) * 4;
+                    u8 a3 = t[i], b3 = t[i + 1], g3 = t[i + 2], rr = t[i + 3];
+                    if (!a3) { u8 c = ((x >> 3) ^ (y >> 3)) & 1 ? 90 : 60; rr = g3 = b3 = c; }
+                    r3[x * 3] = b3; r3[x * 3 + 1] = g3; r3[x * 3 + 2] = rr;
+                }
+                fwrite(r3, 1, rb, f3);
+            }
+            fclose(f3);
+        }
     }
     for (int eye = 0; eye < 1 + (sStereo != 0); eye++) {  // (with stereo also full_N_r: the right eye on top)
     char path[96];
@@ -1224,7 +1254,8 @@ extern const u8 polyid_shbin[];
 extern const u32 polyid_shbin_size;
 static DVLB_s *sDvlbId;
 static shaderProgram_s sProgId;
-static int sLocXform, sLocTc, sLocXformId, sLocTcId, sLocIdp, sLocStereo, sLocStereoId;
+static int sLocXform, sLocTc, sLocXformId, sLocTcId, sLocIdp, sLocStereo, sLocStereoId, sLocWbuf, sLocWbufId;
+static float sWbuf[2];  // (this frame's W-buffering: on, 1 / largest w)
 extern const u8 edge_shbin[];
 extern const u32 edge_shbin_size;
 static DVLB_s *sDvlb3d, *sDvlbEdge;
@@ -1268,6 +1299,7 @@ static bool init3d(void) {
     sLocXform = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "xform");
     sLocTc = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "tcscale");
     sLocStereo = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "stereo");
+    sLocWbuf = shaderInstanceGetUniformLocation(sProg3d.vertexShader, "wbuf");
     sDvlbId = DVLB_ParseFile((u32 *)polyid_shbin, polyid_shbin_size);
     shaderProgramInit(&sProgId);
     shaderProgramSetVsh(&sProgId, &sDvlbId->DVLE[0]);
@@ -1275,6 +1307,7 @@ static bool init3d(void) {
     sLocTcId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "tcscale");
     sLocIdp = shaderInstanceGetUniformLocation(sProgId.vertexShader, "idp");
     sLocStereoId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "stereo");
+    sLocWbufId = shaderInstanceGetUniformLocation(sProgId.vertexShader, "wbuf");
     sDvlbEdge = DVLB_ParseFile((u32 *)edge_shbin, edge_shbin_size);
     shaderProgramInit(&sProgEdge);
     shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
@@ -1901,6 +1934,7 @@ static void depth_reset(void) {  // (the bound target's depth to the far plane, 
     BufInfo_Add(bi, sFarQuad, sizeof(G3Vtx), 3, 0x210);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, 1, 1, 0, 0);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, 0, 0, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, 0, 0, 0, 0);  // (the far plane by z, whatever the frame's mode)
     C3D_TexEnv *env = C3D_GetTexEnv(0);
     C3D_TexEnvInit(env);
     C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
@@ -1928,6 +1962,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
     C3D_SetViewport(vpx, vpy, vpw, vph);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);  // (y flipped: see render3d)
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
     C3D_SetScissor(GPU_SCISSOR_DISABLE, 0, 0, 0, 0);
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     C3D_CullFace(GPU_CULL_NONE);
@@ -1942,6 +1977,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         attrs_3d(f);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
     }
     draw_polys(f, 0, disp3d);
     if ((disp3d & 0x20) && idt && port_edge_mode) {
@@ -1956,6 +1992,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         C3D_BindProgram(&sProgId);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
         if (seams) {  // (the IDs likewise: the outlines then see no cracks)
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, ox, oy);
             draw_ids(f, disp3d, 0);
@@ -1964,6 +2001,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
             attrs_3d(f);
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
             C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
         }
         draw_ids(f, disp3d, 0);
@@ -1977,6 +2015,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         attrs_3d(f);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
         C3D_SetViewport(vpx, vpy, vpw, vph);
     }
     draw_polys(f, 1, disp3d);
@@ -2004,10 +2043,14 @@ static void render3d(int screenW) {
     float vx = x1 - sL, vy = 191 - y2 - sT, vw = x2 - x1 + 1, vh = y2 - y1 + 1;
     sClipX = sClipY = 1.0f;
     if (sWide) { sClipX = vw / sW; sClipY = vh / sH; vx = vy = 0; vw = sW; vh = sH; }
-    if (port_seam_fill) {  // (orthographic: every vertex at one w)
+    {  // (the frame's w range: orthographic (seam fill), W-buffering's scale)
         float wm = 1e30f, wM = 0;
         for (u32 i = 0; i < f->nv; i++) { float w = f->v[i].w; if (w < wm) wm = w; if (w > wM) wM = w; }
         sFlatScene = f->nv == 0 || wM - wm <= wM * 0.001f;
+        // W-buffering (SwapBuffers bit 1): depth from w. (The title screen's Lugia: its z is w,
+        // all on the far plane; by z it drew nothing.)
+        sWbuf[0] = (f->swap & 2) && wM > 0 ? 1.0f : 0.0f;
+        sWbuf[1] = wM > 0 ? 1.0f / (wM * 1.001f) : 0.0f;
     }
     if (sStereo) {
         stereo_convergence(f);

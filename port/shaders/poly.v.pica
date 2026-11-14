@@ -4,6 +4,7 @@
 ; widened, the DS's z/w in -1..1 to the PICA's -w..0, colour to 0..1, texels to 0..1.
 .fvec xform      ; (x scale, y scale (negative), x offset, y offset: clip units per w, the seam-fill pass)
 .fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
+.fvec wbuf       ; (1: W-buffering, 1 / the frame's largest w, 0, 0): depth from w, not z (SwapBuffers bit 1)
 .fvec stereo     ; (eye shift, convergence z/w, depth range, 0): x/w += shift * clamp(z/w - convergence, 0, range) (stereoscopic 3D)
 
 .constf consts(0.00392156862745, 0.5, 0.0, 1.0)
@@ -29,7 +30,14 @@
 	mul r1.y, stereo.x, r1.y
 	add r0.x, r0.x, r1.y
 	add r1.x, inpos.z, -inpos.w
-	mul r0.z, consts.y, r1.x
+	mul r1.x, consts.y, r1.x
+	; W-buffering: depth 1 - w / wmax (nearer: larger), as z = w * w / wmax - w; blended in by wbuf.x
+	mul r7.x, inpos.w, inpos.w
+	mul r7.x, wbuf.y, r7.x
+	add r7.x, -inpos.w, r7.x
+	add r7.x, -r1.x, r7.x
+	mul r7.x, wbuf.x, r7.x
+	add r0.z, r1.x, r7.x
 	mov r0.w, inpos.w
 	mov outpos, r0
 	mul outclr, consts.xxxx, inclr
