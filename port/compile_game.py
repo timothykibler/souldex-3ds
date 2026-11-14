@@ -51,12 +51,44 @@ def assemble(src, obj, incs):
     if pp.returncode:
         return pp.returncode, pp.stderr
     tmp = obj + ".gas.s"
-    with open(tmp, "w") as f:
-        f.write(convert(pp.stdout, move_ds_addresses=True))
     asinc = [i.replace("-I", "-Wa,-I", 1) for i in incs if i.startswith("-I")]
-    r = subprocess.run([CC, "-c", "-march=armv6k", "-mfloat-abi=hard", "-x", "assembler"] + asinc +
-                       [f"-Wa,-I{os.path.dirname(src)}", tmp, "-o", obj], capture_output=True, text=True)
+
+    def build(phase):
+        with open(tmp, "w") as f:
+            f.write(convert(pp.stdout, move_ds_addresses=True, phase=phase))
+        return subprocess.run([CC, "-c", "-march=armv6k", "-mfloat-abi=hard", "-x", "assembler"] + asinc +
+                              [f"-Wa,-I{os.path.dirname(src)}", tmp, "-o", obj], capture_output=True, text=True)
+    r = build(None)
+    if r.returncode:
+        return r.returncode, r.stderr
+    # Each data section word-aligned (mwasm2gas); where its labels sat 2 bytes past a word on the
+    # DS (their names are their DS addresses), it starts that far past one here too.
+    phase = section_phase(obj)
+    if phase:
+        r = build(phase)
     return r.returncode, r.stderr
+
+
+_DS_NAMED = re.compile(r"(?:^|_)(02[0-9A-F]{6})$")
+
+
+def section_phase(obj):
+    """{section: k} for the object's data sections whose DS-named labels are at DS address = k
+    (mod 4) from their offsets, k != 0 (the most common k, if they differ)."""
+    od = CC[:-3] + "objdump" if CC.endswith("gcc") else "arm-none-eabi-objdump"
+    out = subprocess.run([od, "-t", obj], capture_output=True, text=True).stdout
+    votes = {}
+    for line in out.splitlines():
+        p = line.split()
+        if len(p) < 5 or p[-3] not in (".rodata", ".data", ".bss", ".sbss"):
+            continue
+        m = _DS_NAMED.search(p[-1])
+        if not m:
+            continue
+        k = (int(m.group(1), 16) - int(p[0], 16)) % 4
+        votes.setdefault(p[-3], {}).setdefault(k, 0)
+        votes[p[-3]][k] += 1
+    return {sec: max(v, key=v.get) for sec, v in votes.items() if max(v, key=v.get)}
 
 
 def main():

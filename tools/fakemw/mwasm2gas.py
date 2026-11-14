@@ -4,6 +4,8 @@ import re
 
 _SECTIONS = {".rodata": ".section .rodata", ".bss": ".section .bss", ".sbss": ".section .sbss",
              ".ctor": ".section .ctor,\"aw\"", ".init": ".section .init,\"ax\""}
+_DATA_WORD = re.compile(r"^(\s*)\.(word|short)\b")
+_DATA_LIST = re.compile(r"^\s*\.(byte|short|word|2byte|4byte|hword)\b")
 _INCLUDE = re.compile(r'^\s*\.include\s+"([^"]+)"')
 
 
@@ -71,23 +73,46 @@ def _move(m):
     return m.group(0)
 
 
-def convert(text, move_ds_addresses=False):
+def convert(text, move_ds_addresses=False, phase=None):
+    """phase: {section: k}, a section that started k bytes past a word boundary on the DS
+    (its labels at DS addresses = k mod 4 from their offsets): it starts so here too."""
+    phase = phase or {}
     lines = []
+    aligned = set()
+    in_code = True
     for line in text.splitlines():
         line = _strip_comment(line).rstrip()
+        # A trailing comma after data (".byte 0xA8, 0x00,"): nothing to Metrowerks, one more zero
+        # to GNU as, which shifts every table after it off its DS address (and alignment).
+        if line.endswith(",") and _DATA_LIST.match(line):
+            line = line.rstrip(",").rstrip()
         stripped = line.strip()
-        if stripped in _SECTIONS:
-            line = _SECTIONS[stripped]
+        if stripped in _SECTIONS or stripped in (".data", ".text"):
+            in_code = stripped in (".text", ".init")
+            line = _SECTIONS.get(stripped, stripped)
+            # Metrowerks starts a file's sections word-aligned; GNU as gives data sections an
+            # alignment of 1, so the linker could put a table at an odd address and the game's
+            # word loads from it (ldm, ldr) fault on the 3DS. Once per section and file: later
+            # returns to it continue its layout as on the DS. (Some files' data started 2 bytes
+            # past a word on the DS: phase, measured by port/compile_game.py, puts it there.)
+            if stripped not in aligned:
+                aligned.add(stripped)
+                line += "\n\t.balign 4" + (f"\n\t.space {phase[stripped]}" if phase.get(stripped) else "")
         elif stripped.startswith(".public "):
             line = line.replace(".public", ".global", 1)
         else:
             m = _SECTION_ALIGN.match(line)
             if m:
-                flags = '"ax"' if m.group(2).startswith(".text") else '"aw"'
+                in_code = m.group(2).startswith(".text")
+                flags = '"ax"' if in_code else '"aw"'
                 line = f"{m.group(1)}.section {m.group(2)},{flags}\n{m.group(1)}.balign {m.group(3)}"
         line = re.sub(r"@(object|function)\b", r"%\1", line)
         if move_ds_addresses and (".word" in line or "=" in line):
             line = _HEX.sub(_move, line)
+        # In data, GNU as pads before .word and .short to align them; Metrowerks packs data as
+        # written. .4byte / .2byte are the same values, never padded: the DS layout, byte for byte.
+        if not in_code:
+            line = _DATA_WORD.sub(lambda d: d.group(1) + (".4byte" if d.group(2) == "word" else ".2byte"), line)
         lines.append(line)
     if move_ds_addresses:
         _move_io_base_immediates(lines)
