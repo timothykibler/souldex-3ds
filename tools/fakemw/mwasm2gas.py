@@ -116,10 +116,65 @@ def convert(text, move_ds_addresses=False, phase=None):
         lines.append(line)
     if move_ds_addresses:
         _move_io_base_immediates(lines)
+        _move_mem_immediates(lines)
     return "\n".join(lines) + "\n"
 
 
 _LSL26 = re.compile(r"\s*lsls?\s+(r\d),\s*(r\d),\s*#0x1a\b")
+
+
+_MOV_IMM = re.compile(r"^(\s*movs?\s+)(r\d)(,\s*#)(0x[0-9a-fA-F]+|\d+)\s*$")
+_LSL_IMM = re.compile(r"^\s*lsls?\s+(r\d),\s*(r\d),\s*#(0x[0-9a-fA-F]+|\d+)\s*$")
+_MEM_FUNC = re.compile(r"^(MIi?_(Cpu|Dma)\w*|DC_\w+)$")
+
+
+def _move_mem_immediates(lines):
+    """Thumb code also builds the DS's palette, VRAM and OAM addresses (0x05000000-0x070007FF) as
+    `mov rN, #imm` then `lsl rN, rN, #sh` (e.g. 6 << 24 = 0x06000000 for MIi_CpuClear32, clearing
+    VRAM when a battle loads). Where the value is then used as an address (a load/store base,
+    address arithmetic, or an argument of a memory function: MI(i)_Cpu*/Dma*, DC_*), the mov's
+    immediate becomes the moved address's (+ PORT_DS_DELTA, 0x08000000): same instructions, same
+    size, when it still fits; flags and other values stay."""
+    for i, l in enumerate(lines):
+        m = _LSL_IMM.match(l)
+        if not m or m.group(1) != m.group(2):
+            continue
+        reg, sh = m.group(1), int(m.group(3), 0)
+        mov = None
+        for k in range(1, 6):
+            if i - k < 0:
+                break
+            mm = _MOV_IMM.match(lines[i - k])
+            if mm and mm.group(2) == reg:
+                mov = (i - k, mm)
+                break
+            if re.search(rf"\b{reg}\b", lines[i - k]):
+                break
+        if mov is None:
+            continue
+        value = int(mov[1].group(4), 0) << sh
+        if not 0x05000000 <= value < 0x07000800:
+            continue
+        moved = value + 0x08000000
+        if moved & ((1 << sh) - 1) or (moved >> sh) > 255:
+            continue
+        address = False
+        for k in range(1, 9):
+            if i + k >= len(lines):
+                break
+            t = lines[i + k].strip()
+            if re.search(rf"\[{reg}\b", t) or re.match(rf"(add|sub)s?\s+\w+,\s*{reg}\b|(add|sub)s?\s+{reg},", t):
+                address = True
+                break
+            b = re.match(r"blx?\s+(\w+)", t)
+            if b:  # (a call: r0-r3 are its arguments, and clobbered after)
+                address = reg in ("r0", "r1", "r2", "r3") and bool(_MEM_FUNC.match(b.group(1)))
+                break
+            if re.match(rf"\w+\s+{reg}\b", t):  # (redefined)
+                break
+        if address:
+            k, mm = mov
+            lines[k] = f"{mm.group(1)}{mm.group(2)}{mm.group(3)}{hex(moved >> sh)}"
 
 
 def _move_io_base_immediates(lines):

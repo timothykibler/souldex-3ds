@@ -6,10 +6,17 @@
 #include "port.h"
 
 bool port_ctr_frame_wait(void) {
-    // The game's frames paced to the 3DS's VBlank, as the DS's are to its own: wait for one unless
-    // one has already come since the last frame (a frame that ran late then costs only its
-    // overrun, not a whole extra VBlank). (Not in the render thread: it builds while the game runs.)
-    gspWaitForEvent(GSPGPU_EVENT_VBlank0, false);
+    // The game's frames paced to 60 a second, as the DS's are to its VBlank: by the system timer,
+    // sleeping until the next frame's time (a frame that ran late costs only its overrun; one more
+    // than a frame late starts the count afresh, no catching up). Not by the GSP's VBlank event:
+    // on a 3DS (XL) it stopped coming during a battle's start, and the game waited forever.
+    // (The picture still swaps on the real VBlank: citro3d.)
+    static u64 next;
+    const u64 period = SYSCLOCK_ARM11 / 60;  // (268111856 / 60 ticks)
+    u64 now = svcGetSystemTick();
+    if (next && now < next) svcSleepThread((s64)((next - now) * 1000000000ULL / SYSCLOCK_ARM11));
+    now = svcGetSystemTick();
+    next = (!next || now > next + period) ? now + period : next + period;
     return aptMainLoop();
 }
 
