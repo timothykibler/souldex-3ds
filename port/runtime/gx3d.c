@@ -103,13 +103,17 @@ static int sUseShininess;
 // ---------------------------------------------------------------- output
 #define MAX_VTX 24576
 #define MAX_POLY 8192
-static G3Frame sFrames[2];   // [building, shown]
-static int sBuild = 0, sHaveShown, sSwapPending;
+// Three frames, in rotation: the one the game is building, the one shown (being drawn), and the
+// one shown before it, which the GPU may still be drawing from (it runs a frame behind the CPU:
+// the render core and the GPU work while the game goes on), so it isn't written until the next
+// swap. With two, the game wrote into vertices the GPU was still drawing: broken 3D on hardware.
+static G3Frame sFrames[3];
+static int sBuild = 0, sShown = 1, sHaveShown, sSwapPending;
 static G3Vtx sPrimVtx[4];    // vertices of the primitive being assembled
 static int sPrimN, sPrimCount;
 
 static void frames_init(void) {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         sFrames[i].v = port_linear_alloc(sizeof(G3Vtx) * MAX_VTX);  // (drawn from where it is: GPU-visible)
         sFrames[i].p = malloc(sizeof(G3Poly) * MAX_POLY);
     }
@@ -459,9 +463,10 @@ static void init_once(void) {
     done = 1;
     mtx_identity(sProj); mtx_identity(sPos); mtx_identity(sVec); mtx_identity(sTex);
     frames_init();
-    for (int i = 0; i < 2; i++) { sFrames[i].zn0 = sFrames[i].zd0 = sFrames[i].zd1 = 1; sFrames[i].zn1 = -1; }
-    sFrames[0].viewport[2] = sFrames[1].viewport[2] = 255;
-    sFrames[0].viewport[3] = sFrames[1].viewport[3] = 191;
+    for (int i = 0; i < 3; i++) {
+        sFrames[i].zn0 = sFrames[i].zd0 = sFrames[i].zd1 = 1; sFrames[i].zn1 = -1;
+        sFrames[i].viewport[2] = 255; sFrames[i].viewport[3] = 191;
+    }
     // (written straight by the game's assembly: a value no game writes marks "nothing new")
     *IO(0x540) = 0xFFFFFFFFu;
     *IO(0x580) = 0xFFFFFFFFu;
@@ -564,7 +569,7 @@ void port_g3_write(unsigned long addr, unsigned long value) {
 }
 
 // ---------------------------------------------------------------- frames
-const G3Frame *port_g3_frame(void) { return sHaveShown ? &sFrames[!sBuild] : NULL; }
+const G3Frame *port_g3_frame(void) { return sHaveShown ? &sFrames[sShown] : NULL; }
 
 int port_g3_vblank(void) {
     init_once();
@@ -576,7 +581,7 @@ int port_g3_vblank(void) {
         for (int i = 0; i < 16; i++) port_log(" %ld", (long)sProj[i]);
         port_log("\n");
         // the frame being shown: triangles with a vertex far off screen, behind or near the camera
-        const G3Frame *f = &sFrames[!sBuild];
+        const G3Frame *f = &sFrames[sShown];
         int shown = 0;
         port_log("frame: %lu polygons, %lu vertices\n", (unsigned long)f->np, (unsigned long)f->nv);
         for (u32 pi = 0; pi < f->np; pi++) {
@@ -611,7 +616,6 @@ int port_g3_vblank(void) {
         }
         sTraceLeft = 400;  // and the next frame's first commands
     }
-    memset(sHist, 0, sizeof(sHist));
     // (the game's assembly also writes SWAP_BUFFERS straight into its register: seen here)
     volatile u32 *swapReg = IO(0x540);
     if (*swapReg != 0xFFFFFFFFu) {
@@ -626,12 +630,16 @@ int port_g3_vblank(void) {
     }
     if (!sSwapPending) return 0;
     sSwapPending = 0;
-    sBuild ^= 1;
+    {  // (the built frame is shown; building goes on in the one shown before the last)
+        int next = 3 - sBuild - sShown;
+        sShown = sBuild;
+        sBuild = next;
+    }
     sHaveShown = 1;
     G3Frame *f = &sFrames[sBuild];
     f->nv = 0;
     f->np = 0;
     f->zn0 = 1; f->zd0 = 1; f->zn1 = -1; f->zd1 = 1;
-    memcpy(f->viewport, sFrames[!sBuild].viewport, 4);
+    memcpy(f->viewport, sFrames[sShown].viewport, 4);
     return 1;
 }

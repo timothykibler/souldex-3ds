@@ -96,6 +96,9 @@ void port_frame(void) {
         gG3Ticks = 0;
         extern uint64_t gRenderWaitTicks;
         port_log("  waiting for the render core %lu us per frame\n", (unsigned long)(gRenderWaitTicks / 600 / 268));
+        extern u64 gGpuDrawUs;
+        port_log("  GPU drawing %lu us per frame\n", (unsigned long)(gGpuDrawUs / 600));
+        gGpuDrawUs = 0;
         gRenderWaitTicks = 0;
         extern void port_g3_hist_report(void);
         port_g3_hist_report();

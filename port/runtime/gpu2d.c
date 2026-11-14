@@ -1065,6 +1065,7 @@ void port_gpu2d_bottom_console(int console) {
 // Draws both engines onto their screens (engine A on top when POWCNT1 bit 15 says so).
 static int sReadable;  // (screenshot mode: single-buffered screens, so what's shown can be read)
 
+u64 gGpuDrawUs;       // (the GPU drawing, per frame, summed: the log's "GPU drawing")
 u64 gGpu2dBusyTicks;
 u64 gGpu2dWaitTicks;  // waiting in C3D_FrameBegin (the GPU's previous frame, the frame-rate limit)  // CPU time building the frame (not waiting for the GPU or the VBlank)
 u64 gGpu2dMaxTicks;   // the slowest frame
@@ -1090,6 +1091,7 @@ void port_gpu2d_frame(void) {
     stereo_decide(((rd16(DS(0x04000304)) >> 15) & 1) && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     u64 tw = svcGetSystemTick();
     C3D_FrameBegin(0);  // (the GPU's previous frame finished; the pacing to the VBlank is the game thread's: port_ctr_frame_wait)
+    gGpuDrawUs += (u64)(C3D_GetDrawingTime() * 1000.0f);  // (the GPU's own time on the last frame, citro3d's measure)
     u64 t0 = svcGetSystemTick();
     gGpu2dWaitTicks += t0 - tw;
     sVtxUsed = 0;
