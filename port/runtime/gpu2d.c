@@ -71,6 +71,7 @@ static int sSSTop = 2;  // the top screen's
 static int sSSBot = 2;  // the bottom's: it always fills, at 2x, except while the 3D slider is up (bottom_ss_wanted)
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
+static int sFbH = 240;        // the target's short side (its rows, rotated): 240, or 192 for the DS-size intermediate
 static int sWide;             // this frame's 3D layer is widened
 static int sMargins;          // the top screen's sides continue the DS picture's edge columns (not widened)
 static C3D_Tex sShade;        // (the sides' darkening: alpha rising outwards)
@@ -811,10 +812,10 @@ static void flat(u32 abgr, int x0, int y0, int x1, int y1) {
 // The scissor box around the DS picture (or the whole screen), in the screen target's own
 // (rotated) coordinates.
 static void scissor_ds(int whole) {
-    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, 240 * sSS, (u32)sScrW * sSS); return; }
+    if (whole) { C3D_SetScissor(GPU_SCISSOR_NORMAL, 0, 0, sFbH * sSS, (u32)sScrW * sSS); return; }
     int x0 = (int)(-sL * sScale * sSS + 0.5f), y0 = (int)(-sT * sScale * sSS + 0.5f);
     int w = (int)(256 * sScale * sSS + 0.5f), h = (int)(192 * sScale * sSS + 0.5f);
-    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(240 * sSS - (y0 + h)), (u32)x0, (u32)(240 * sSS - y0), (u32)(x0 + w));
+    C3D_SetScissor(GPU_SCISSOR_NORMAL, (u32)(sFbH * sSS - (y0 + h)), (u32)x0, (u32)(sFbH * sSS - y0), (u32)(x0 + w));
 }
 
 static void layout(int screenW) {
@@ -822,15 +823,36 @@ static void layout(int screenW) {
     sScale = (bottom ? port_bottom_scaled() : port_display_scaled()) ? 1.25f : 1.0f;
     sSS = bottom ? sSSBot : sSSTop;
     sScrW = screenW;
+    sFbH = 240;
     sW = screenW / sScale; sH = 240 / sScale;
     sL = -(sW - 256) / 2; sT = -(sH - 192) / 2;
 }
+// The bottom screen composed at the DS's own size (the intermediate below): scale 1, 256x192.
+static void layout_ds(void) {
+    sScale = 1.0f; sSS = 1; sScrW = 256; sFbH = 192;
+    sW = 256; sH = 192; sL = 0; sT = 0;
+}
 
-static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
+// The bottom screen at 1.25x: its layers are composed once at the DS's size into this target
+// (256x256, rotated like the screens: 192 rows used), then drawn onto the screen in one pass,
+// 2.5x nearest into the 2x target that the display transfer box-filters: the picture of
+// composing every layer at 2.5x, for a sixth of the GPU's pixels (the GPU was the 3DS's limit).
+static C3D_Tex sDsTex;
+static C3D_RenderTarget *sDsTarget;
+static int sDsPass;  // (render_engine is drawing into the DS-size target)
+
+static void render_engine_layers(Eng *e, C3D_RenderTarget *t, int screenW) {
     int ei = !e->main;
     e->dispcnt = rd32(e->io);
-    C3D_FrameDrawOn(t);
     layout(screenW);
+    sDsPass = screenW == 320 && sScale > 1.0f && sDsTarget;
+    if (sDsPass) {
+        C3D_FrameDrawOn(sDsTarget);
+        C3D_SetViewport(0, 0, 192, 256);
+        layout_ds();
+    } else {
+        C3D_FrameDrawOn(t);
+    }
     C3D_Mtx proj;
     Mtx_OrthoTilt(&proj, sL, sL + sW, sT + sH, sT, -1, 1, true);
     C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
@@ -948,6 +970,36 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     }
 }
 
+// The DS-size picture onto the screen: one quad over the DS rectangle, 2.5x nearest. (The
+// intermediate is rotated like the screens: its rows (x) are DS y from the bottom, its columns
+// (y) DS x, v = 1 - x / 256: checked against composing at 2.5x, pixel for pixel.)
+static void ds_final(C3D_RenderTarget *t, int screenW) {
+    C3D_FrameDrawOn(t);
+    layout(screenW);
+    C3D_Mtx proj;
+    Mtx_OrthoTilt(&proj, sL, sL + sW, sT + sH, sT, -1, 1, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
+    sOX = sOY = 0;
+    scissor_ds(1);
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    blend_off();
+    set_tev(TEV_PLAIN, 0);
+    C3D_TexBind(0, &sDsTex);
+    static const float xy[4][2] = { { 0, 0 }, { 256, 0 }, { 0, 192 }, { 256, 192 } };
+    // (DS x runs down the texture's v from the top: 1 - x / 256. Edges can land half a pixel
+    // apart from composing every layer at 2.5x: the same 1.25x, rounded at other ties.)
+    static const float uv[4][2] = { { 192 / 256.0f, 1 }, { 192 / 256.0f, 0 }, { 0, 1 }, { 0, 0 } };
+    quad4(xy, uv);
+    scissor_ds(0);
+}
+
+static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
+    render_engine_layers(e, t, screenW);
+    if (sDsPass) { ds_final(t, screenW); sDsPass = 0; }
+}
+
 // ---------------------------------------------------------------- frames
 static bool sReady;
 
@@ -998,7 +1050,7 @@ static bool make_targets_(int ss) {
     sSSTop = ss;  // (the top screen's; the bottom is always made at 2x)
     int sb = sSSBot = bottom_ss_wanted();
     sTop = C3D_RenderTargetCreate(240 * ss, 400 * ss, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
-    sBottom = C3D_RenderTargetCreate(240 * sb, 320 * sb, GPU_RB_RGB8, GPU_RB_DEPTH24_STENCIL8);
+    sBottom = C3D_RenderTargetCreate(240 * sb, 320 * sb, GPU_RB_RGB8, -1);  // (no depth-stencil: the layers are composed at DS size, see render_engine)
     if (!sTop || !sBottom) {
         port_log("gpu: no screen targets (vram free %lu)\n", vramSpaceFree());
         if (sTop) { C3D_RenderTargetDelete(sTop); sTop = NULL; }
@@ -1071,8 +1123,10 @@ u64 gGpu2dWaitTicks;  // waiting in C3D_FrameBegin (the GPU's previous frame, th
 u64 gGpu2dMaxTicks;   // the slowest frame
 u32 gGpu2dRebuilds;   // BG textures rebuilt
 
+extern volatile const char *port_stage;
 void port_gpu2d_frame(void) {
     if (!sReady) return;
+    port_stage = "render: start";
     if (!port_stereo_enabled && (sTopR || sStereo)) {  // (stereo switched off: the right eye's VRAM back, outside a frame, the GPU done with it)
         C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
         C3D_FrameEnd(0);
@@ -1090,6 +1144,7 @@ void port_gpu2d_frame(void) {
     // (before the frame: citro3d makes and deletes render targets only outside one)
     stereo_decide(((rd16(DS(0x04000304)) >> 15) & 1) && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     u64 tw = svcGetSystemTick();
+    port_stage = "render: waiting for the GPU (C3D_FrameBegin)";
     C3D_FrameBegin(0);  // (the GPU's previous frame finished; the pacing to the VBlank is the game thread's: port_ctr_frame_wait)
     gGpuDrawUs += (u64)(C3D_GetDrawingTime() * 1000.0f);  // (the GPU's own time on the last frame, citro3d's measure)
     u64 t0 = svcGetSystemTick();
@@ -1100,9 +1155,12 @@ void port_gpu2d_frame(void) {
     a = (Eng){ 1, DS(0x04000000), DS(0x05000000), DS(0x05000200), DS(0x07000000), DS(0x06000000), DS(0x06400000), 0x80000, 0x40000, 0 };
     b = (Eng){ 0, DS(0x04001000), DS(0x05000400), DS(0x05000600), DS(0x07000400), DS(0x06200000), DS(0x06600000), 0x20000, 0x20000, 0 };
     int a_on_top = (rd16(DS(0x04000304)) >> 15) & 1;
+    port_stage = "render: 3D layer";
     { u64 t = svcGetSystemTick(); render3d(a_on_top ? 400 : 320); gProf3d += svcGetSystemTick() - t; }
+    port_stage = "render: 2D engines";
     C3D_RenderTargetClear(sTop, C3D_CLEAR_ALL, 0, 0);  // (0: black in any colour format)
     C3D_RenderTargetClear(sBottom, C3D_CLEAR_ALL, 0, 0);
+    if (sDsTarget) C3D_RenderTargetClear(sDsTarget, C3D_CLEAR_ALL, 0, 0);
     render_engine(&a, a_on_top ? sTop : sBottom, a_on_top ? 400 : 320);
     render_engine(&b, a_on_top ? sBottom : sTop, a_on_top ? 320 : 400);
     if (sStereo && sTopR) {  // the right eye: the top screen again, with the right eye's 3D layer
@@ -1117,7 +1175,9 @@ void port_gpu2d_frame(void) {
     // (vertices the CPU wrote this frame, out of its data cache before the GPU reads them)
     GSPGPU_FlushDataCache(sVbo, sVtxUsed * sizeof(Vtx));
     flush_edge_vertices();
+    port_stage = "render: C3D_FrameEnd";
     C3D_FrameEnd(0);
+    port_stage = "render: done";
 }
 
 // For checking: what the screens show, as DS colours (the DS rectangle of each screen).
@@ -1329,6 +1389,7 @@ static bool init3d(void) {
 // (Freed and made again whenever the display mode changes, after the screens' targets: VRAM is
 // then laid out as at start-up, never fragmented by the change.)
 static void free3d(void) {
+    if (sDsTarget) { C3D_RenderTargetDelete(sDsTarget); sDsTarget = NULL; C3D_TexDelete(&sDsTex); }
     if (sIdTarget) { C3D_RenderTargetDelete(sIdTarget); sIdTarget = NULL; C3D_TexDelete(&sIdTex); }
     if (s3dTarget) { C3D_RenderTargetDelete(s3dTarget); s3dTarget = NULL; C3D_TexDelete(&s3dTex); }
 }
@@ -1345,6 +1406,11 @@ static bool alloc3d(void) {
         // columns, the PICA doesn't reproduce depths bit for bit between passes)
         sIdTarget = C3D_RenderTargetCreateFromTex(&sIdTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH16);
         if (!sIdTarget) C3D_TexDelete(&sIdTex);
+    }
+    if (C3D_TexInitVRAM(&sDsTex, 256, 256, GPU_RGB8)) {  // (the bottom screen at DS size: render_engine; after the 3D layer's)
+        C3D_TexSetFilter(&sDsTex, GPU_NEAREST, GPU_NEAREST);
+        sDsTarget = C3D_RenderTargetCreateFromTex(&sDsTex, GPU_TEXFACE_2D, 0, GPU_RB_DEPTH24_STENCIL8);
+        if (!sDsTarget) C3D_TexDelete(&sDsTex);
     }
     return true;
 }

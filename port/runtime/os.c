@@ -65,7 +65,10 @@ static u64 sGameTicks, sFrameEnter, sFrameExit;
 void port_frame(void) {
     sFrameEnter = port_ctr_ticks();
     if (sFrameExit) sGameTicks += sFrameEnter - sFrameExit;  // (the game's own code since the last frame)
+    extern volatile const char *port_stage;
+    port_stage = "frame: waiting for the render core";
     port_render_wait();  // (the last frame's picture built: video memory may change again from here)
+    port_stage = "frame: waiting for the VBlank";
     if (!port_ctr_frame_wait()) port_ctr_exit(0);
     port_frame_count++;
     if (port_frame_count % 600 == 0) {
@@ -119,6 +122,7 @@ void port_frame(void) {
     run_alarms();
     // The game's VBlank handler (OS_SetIrqFunction(OS_IE_V_BLANK, ...)): it does the frame's
     // transfers and sets the interrupt check flag the main loop waits for.
+    port_stage = "frame: the game's VBlank handler";
     OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
     if (vblank && !sInIrq) { sInIrq = 1; vblank(); sInIrq = 0; }
     INTR_CHECK |= OS_IE_V_BLANK;
@@ -132,6 +136,7 @@ void port_frame(void) {
     u64 t0 = port_ctr_ticks();
     port_render_start(port_gpu2d_frame);  // (on the render core while the game goes on; see ctr.c)
     renderTicks += port_ctr_ticks() - t0;
+    port_stage = "game code";
     if (port_dump_every && port_frame_count % port_dump_every == 0) {
         static u16 top[256 * 192], bottom[256 * 192];
         port_render_wait();

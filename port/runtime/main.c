@@ -78,6 +78,7 @@ int main(void) {
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
     port_log_screen = 0;  // (the console would draw over the GPU's bottom screen, in the wrong format: static)
+    { void port_watchdog_start(void); port_watchdog_start(); }
 
     if (!port_ds_mem_init()) port_fatal("could not set up the DS memory window");
     if (!port_rom_open()) port_fatal("no SoulSilver ROM: put it at " PORT_DIR "/soulsilver.nds");

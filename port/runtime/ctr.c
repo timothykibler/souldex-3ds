@@ -180,3 +180,30 @@ void port_render_wait(void) {
     while (sRenderBusy) LightEvent_Wait(&sRenderDone);
     gRenderWaitTicks += svcGetSystemTick() - t;
 }
+
+// ---------------------------------------------------------------- the watchdog
+// A freeze leaves no crash dump and no last log line (the log stops with the frame). So a thread
+// that wakes twice a second logs, when no frame has finished for 3 s, where the game is stuck:
+// the stage (port_stage, set at the frame's steps) and the frame. Above the game thread's
+// priority on its core: it runs even if the game spins.
+volatile const char *port_stage = "start";
+static void watchdog_main(void *arg) {
+    (void)arg;
+    extern volatile uint32_t port_frame_count;
+    extern void port_log(const char *fmt, ...);
+    uint32_t last = 0, still = 0, reported = 0;
+    for (;;) {
+        svcSleepThread(500000000LL);
+        uint32_t f = port_frame_count;
+        if (f != last) { last = f; still = 0; reported = 0; continue; }
+        if (++still >= 6 && !reported) {
+            reported = 1;
+            port_log("WATCHDOG: no frame for 3 s at frame %lu, stage: %s\n", (unsigned long)f, (const char *)port_stage);
+        }
+    }
+}
+void port_watchdog_start(void) {
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    if (!threadCreate(watchdog_main, NULL, 8 * 1024, prio - 1, -2, true)) port_log("watchdog: not started\n");
+}
