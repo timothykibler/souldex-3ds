@@ -7,6 +7,8 @@ and the parts of Nintendo's SDK that drove it. The game's files are read from yo
 not an emulator: the game runs as a 3DS program.
 
 **New here? See [GETTING_STARTED.md](GETTING_STARTED.md)** to build, install and play.
+**[PROJECT_STATUS.md](PROJECT_STATUS.md)** covers what's done, what runs natively and what is still
+emulated, and the next tasks.
 
 ## What it does
 
