@@ -627,16 +627,17 @@ static void free3d(void);
 static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
-    if (d->kind == 3) {  // the 3D layer: rendered at the screen's own resolution, the whole screen
+    if (d->kind == 3) {  // the 3D layer: rendered on the DS's pixel grid over the whole screen (render3d)
+        // (scaled up here like every other layer: at 1.25x its pixels stay even, as the 2D's do)
         C3D_TexBind(0, port_edge_mode >= 2 && sIdTarget ? sIdCur : s3dCur);
         if (sWide) scissor_ds(1);
-        quad(sL, sT, sL + sW, sT + sH, 0, 0, sScrW / 512.0f, 240 / 256.0f);
+        quad(sL, sT, sL + sW, sT + sH, 0, 0, sW / 512.0f, sH / 256.0f);
         if (sWide) scissor_ds(0);
-        if (sMargins) {  // (its edge columns, in screen pixels)
-            float uL = ((0 - sL) * sScale + 0.5f) / 512, uR = ((256 - sL) * sScale - 0.5f) / 512;
+        if (sMargins) {  // (its edge columns)
+            float uL = (0 - sL + 0.5f) / 512, uR = (256 - sL - 0.5f) / 512;
             scissor_ds(1);
-            quad(sL, 0, 0, 192, uL, (0 - sT) * sScale / 256, uL, (192 - sT) * sScale / 256);
-            quad(256, 0, sL + sW, 192, uR, (0 - sT) * sScale / 256, uR, (192 - sT) * sScale / 256);
+            quad(sL, 0, 0, 192, uL, (0 - sT) / 256, uL, (192 - sT) / 256);
+            quad(256, 0, sL + sW, 192, uR, (0 - sT) / 256, uR, (192 - sT) / 256);
             scissor_ds(0);
         }
         return;
@@ -1621,7 +1622,7 @@ static void draw_edges(void) {
     C3D_BufInfo *bi = C3D_GetBufInfo();
     BufInfo_Init(bi);
     BufInfo_Add(bi, sVboEdge, sizeof(VE), 3, 0x210);
-    C3D_SetViewport(0, 0, (u32)sScrW, 240);
+    C3D_SetViewport(0, 0, (u32)(sW + 0.5f), (u32)(sH + 0.5f));  // (the 3D layer's DS-pixel grid)
     C3D_DepthTest(false, GPU_ALWAYS, GPU_WRITE_COLOR);
     C3D_AlphaTest(true, GPU_GREATER, 0);
     blend_off();
@@ -1632,7 +1633,7 @@ static void draw_edges(void) {
     u16 ec = rd16(DS(0x04000330));
     u32 r = ec & 31, g = (ec >> 5) & 31, b = (ec >> 10) & 31;
     u32 abgr = 0xFF000000u | (b << 3 | b >> 2) << 16 | (g << 3 | g >> 2) << 8 | (r << 3 | r >> 2);
-    const float U = sScrW / 512.0f, V = 240 / 256.0f;
+    const float U = sW / 512.0f, V = sH / 256.0f;
     static const int nb[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
     int n = 0;
     for (int d = 0; d < 4; d++) {
@@ -1883,11 +1884,13 @@ static void render3d(int screenW) {
     // the DS viewport (x1, y1 from the bottom, x2, y2) on the 256x192 picture. (Measured with a test
     // square: the render target's viewport y counts from the picture's top, and its y axis points
     // down, so vertices go in with y negated.)
-    // In screen pixels (the image covers the whole screen: DS pixel x is at (x - sL) * sScale).
+    // In DS pixels: the image covers the whole screen on the DS's pixel grid (texel x is DS pixel
+    // x - sL), scaled up by the compositor like the 2D layers. (Drawn at the screen's 1.25x
+    // instead, the 3D's pixels came out uneven, rows and columns doubled, in fill mode.)
     int x1 = f->viewport[0], y1 = f->viewport[1], x2 = f->viewport[2], y2 = f->viewport[3];
-    float vx = (x1 - sL) * sScale, vy = (191 - y2 - sT) * sScale, vw = (x2 - x1 + 1) * sScale, vh = (y2 - y1 + 1) * sScale;
+    float vx = x1 - sL, vy = 191 - y2 - sT, vw = x2 - x1 + 1, vh = y2 - y1 + 1;
     sClipX = sClipY = 1.0f;
-    if (sWide) { sClipX = vw / sScrW; sClipY = vh / 240; vx = vy = 0; vw = (float)sScrW; vh = 240; }
+    if (sWide) { sClipX = vw / sW; sClipY = vh / sH; vx = vy = 0; vw = sW; vh = sH; }
     if (sStereo) {
         stereo_convergence(f);
         render3d_eye(f, -1, vx, vy, vw, vh, disp3d, clear);
