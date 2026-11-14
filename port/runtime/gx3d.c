@@ -52,20 +52,35 @@ static Mtx sProjStack[1], sPosStack[32], sVecStack[32], sTexStack[1];
 static int sPosSp, sProjSp, sMode;
 static int sClipDirty = 1;
 
-// The clip matrix (position x projection), computed when something needs it.
+// The clip matrix (position x projection), computed when something needs it: for vertices in
+// float (from the two matrices directly, every matrix change before a vertex), in the DS's fixed
+// point only when the game reads it back or tests against it (update_clip_fixed).
+static int sClipFixedDirty = 1;
 static void update_clip(void) {
     if (!sClipDirty) return;
-    mtx_mul(sClip, sPos, sProj);
     sClipDirty = 0;
-    // (vertices are 4.12 integers: clip = (v * M) >> 24, and the translation row (M << 12) >> 24)
-    for (int i = 0; i < 12; i++) sClipF[i] = (float)sClip[i] * (1.0f / 16777216.0f);
-    for (int i = 12; i < 16; i++) sClipF[i] = (float)sClip[i] * (1.0f / 4096.0f);
+    sClipFixedDirty = 1;
+    float P[16], Q[16];
+    for (int i = 0; i < 16; i++) { P[i] = (float)sPos[i]; Q[i] = (float)sProj[i]; }
+    // (vertices are 4.12 integers: clip = (v * M) >> 24, and the translation row (M << 12) >> 24;
+    // M itself is (P * Q) >> 12)
+    for (int i = 0; i < 4; i++) {
+        const float k = i < 3 ? 1.0f / (4096.0f * 16777216.0f) : 1.0f / (4096.0f * 4096.0f);
+        for (int j = 0; j < 4; j++)
+            sClipF[i * 4 + j] = (P[i * 4] * Q[j] + P[i * 4 + 1] * Q[4 + j] + P[i * 4 + 2] * Q[8 + j] + P[i * 4 + 3] * Q[12 + j]) * k;
+    }
+}
+static void update_clip_fixed(void) {
+    update_clip();
+    if (!sClipFixedDirty) return;
+    mtx_mul(sClip, sPos, sProj);
+    sClipFixedDirty = 0;
 }
 
 // The result registers the game reads (the clip matrix at 0x640, the direction matrix at 0x680),
 // written only when it reads them: G3X_GetClipMtx / G3X_GetVectorMtx are wrapped (port/build.py).
 static void publish_matrices(void) {
-    update_clip();
+    update_clip_fixed();
     volatile u32 *c = IO(0x640);
     for (int i = 0; i < 16; i++) c[i] = (u32)sClip[i];
     volatile u32 *v = IO(0x680);
@@ -134,7 +149,7 @@ static void frames_init(void) {
 static int alpha_of(u32 attr) { return (attr >> 16) & 31; }
 
 int port_g3_prof;  // (debug.txt "g3prof N", timing by ablation: 1 no polygon assembly, 2 no vertex work, 3 decode only)
-static void emit_triangles(const G3Vtx *v, int n) {
+static void emit_triangles(const G3Vtx *const *v, int n) {  // (pointers: the strips' vertices aren't copied to reorder them)
     if (port_g3_prof == 1) return;
     // n = 3 (triangle) or 4 (quad, as two triangles)
     G3Frame *f = &sFrames[sBuild];
@@ -144,11 +159,11 @@ static void emit_triangles(const G3Vtx *v, int n) {
     if (((sPolyAttr >> 4) & 3) == 3) return;  // (shadow polygons: not yet)
     // culling: DS front faces are those drawn clockwise on screen, where y points down; here y
     // points up (clip space), so clockwise on screen is a positive area
-    int allw = v[0].w > 0 && v[1].w > 0 && v[2].w > 0 && (n == 3 || v[3].w > 0);
+    int allw = v[0]->w > 0 && v[1]->w > 0 && v[2]->w > 0 && (n == 3 || v[3]->w > 0);
     if (allw) {
         // (the projected triangle's area times w0 w1 w2 > 0: its sign without dividing; a quad is
         // planar and convex, its first three corners have its winding)
-        const G3Vtx *a = &v[0], *b = &v[1], *c = &v[2];
+        const G3Vtx *a = v[0], *b = v[1], *c = v[2];
         float area = (a->x * b->y - b->x * a->y) * c->w + (b->x * c->y - c->x * b->y) * a->w + (c->x * a->y - a->x * c->y) * b->w;
         int front = area > 0;
         if (front && !(sPolyAttr & 0x80)) return;
@@ -170,7 +185,7 @@ static void emit_triangles(const G3Vtx *v, int n) {
     // (what the renderer needs per polygon and frame, while the values are at hand: texture
     // bounds, and the opaque z/w range kept as fractions, compared without dividing)
     for (int i = 0; i < n; i++) {
-        const G3Vtx *a = &v[i];
+        const G3Vtx *a = v[i];
         if (a->s < p->s0) p->s0 = a->s;
         if (a->s > p->s1) p->s1 = a->s;
         if (a->t < p->t0) p->t0 = a->t;
@@ -181,7 +196,7 @@ static void emit_triangles(const G3Vtx *v, int n) {
         }
     }
     static const int quadIdx[6] = { 0, 1, 2, 0, 2, 3 };
-    for (int i = 0; i < ntri * 3; i++) f->v[f->nv++] = v[n == 4 ? quadIdx[i] : i];
+    for (int i = 0; i < ntri * 3; i++) f->v[f->nv++] = *v[n == 4 ? quadIdx[i] : i];
     p->count += ntri * 3;
 }
 
@@ -206,6 +221,8 @@ static void add_vertex(s32 x, s32 y, s32 z) {
     if (sPrim < 0 || port_g3_prof == 2) return;
     if (sClipDirty) update_clip();
     G3Vtx v;
+    static u32 sLastColor = ~0u, sLastAttr = ~0u;
+    static u8 sR, sG, sB, sA;  // (the colour and alpha as bytes, converted when they change)
     // (in float: what the GPU draws needn't match the DS's fixed point to the last bit, and the
     // 64-bit products and their conversions were most of the geometry engine's time)
     const float fx = (float)x, fy = (float)y, fz = (float)z, *M = sClipF;
@@ -214,38 +231,41 @@ static void add_vertex(s32 x, s32 y, s32 z) {
     v.z = fx * M[2] + fy * M[6] + fz * M[10] + M[14];
     v.w = fx * M[3] + fy * M[7] + fz * M[11] + M[15];
     if (port_g3_snap && v.w > 0) snap_to_pixels(&v);
-    int r = sColor & 31, g = (sColor >> 5) & 31, b = (sColor >> 10) & 31;
-    v.r = (u8)(r << 3 | r >> 2); v.g = (u8)(g << 3 | g >> 2); v.b = (u8)(b << 3 | b >> 2);
-    int a = alpha_of(sPolyAttr);
-    v.a = (u8)(a << 3 | a >> 2);
+    if (sColor != sLastColor) {
+        sLastColor = sColor;
+        int r = sColor & 31, g = (sColor >> 5) & 31, b = (sColor >> 10) & 31;
+        sR = (u8)(r << 3 | r >> 2); sG = (u8)(g << 3 | g >> 2); sB = (u8)(b << 3 | b >> 2);
+    }
+    if (sPolyAttr != sLastAttr) { sLastAttr = sPolyAttr; int a = alpha_of(sPolyAttr); sA = (u8)(a << 3 | a >> 2); }
+    v.r = sR; v.g = sG; v.b = sB; v.a = sA;
     s32 ts = sTs, tt = sTt;
     if ((sTexImage >> 30) == 3) {  // texture coordinates from the vertex
         ts = sS + (s32)(((s64)x * sTex[0] + (s64)y * sTex[4] + (s64)z * sTex[8]) >> 24);
         tt = sT + (s32)(((s64)x * sTex[1] + (s64)y * sTex[5] + (s64)z * sTex[9]) >> 24);
     }
-    v.s = ts / 16.0f; v.t = tt / 16.0f;
+    v.s = ts * (1.0f / 16.0f); v.t = tt * (1.0f / 16.0f);
 
     sPrimVtx[sPrimN++] = v;
     sPrimCount++;
+    const G3Vtx *P = sPrimVtx;
     switch (sPrim) {
     case 0:  // triangles
-        if (sPrimN == 3) { emit_triangles(sPrimVtx, 3); sPrimN = 0; }
+        if (sPrimN == 3) { const G3Vtx *t[3] = { P, P + 1, P + 2 }; emit_triangles(t, 3); sPrimN = 0; }
         break;
     case 1:  // quads
-        if (sPrimN == 4) { emit_triangles(sPrimVtx, 4); sPrimN = 0; }
+        if (sPrimN == 4) { const G3Vtx *q[4] = { P, P + 1, P + 2, P + 3 }; emit_triangles(q, 4); sPrimN = 0; }
         break;
     case 2:  // triangle strip: each new vertex with the two before it, winding alternating
         if (sPrimN == 3) {
-            G3Vtx t[3];
-            if (sPrimCount & 1) { t[0] = sPrimVtx[0]; t[1] = sPrimVtx[1]; t[2] = sPrimVtx[2]; }
-            else { t[0] = sPrimVtx[1]; t[1] = sPrimVtx[0]; t[2] = sPrimVtx[2]; }
+            const int odd = sPrimCount & 1;
+            const G3Vtx *t[3] = { odd ? P : P + 1, odd ? P + 1 : P, P + 2 };
             emit_triangles(t, 3);
             sPrimVtx[0] = sPrimVtx[1]; sPrimVtx[1] = sPrimVtx[2]; sPrimN = 2;
         }
         break;
     case 3:  // quad strip: each new pair with the pair before it
         if (sPrimN == 4) {
-            G3Vtx q[4] = { sPrimVtx[0], sPrimVtx[1], sPrimVtx[3], sPrimVtx[2] };
+            const G3Vtx *q[4] = { P, P + 1, P + 3, P + 2 };
             emit_triangles(q, 4);
             sPrimVtx[0] = sPrimVtx[2]; sPrimVtx[1] = sPrimVtx[3]; sPrimN = 2;
         }
@@ -290,7 +310,7 @@ static void normal(u32 p) {
 static void box_test(const u32 *p) {
     s32 x = (int16_t)p[0], y = (int16_t)(p[0] >> 16), z = (int16_t)p[1];
     s32 w = (int16_t)(p[1] >> 16), h = (int16_t)p[2], d = (int16_t)(p[2] >> 16);
-    if (sClipDirty) update_clip();
+    update_clip_fixed();
     // visible unless all 8 corners are outside the same clip plane
     int outside[6] = { 1, 1, 1, 1, 1, 1 };
     for (int c = 0; c < 8; c++) {
@@ -312,7 +332,7 @@ static void box_test(const u32 *p) {
 static void pos_test(const u32 *p) {
     s32 x = (int16_t)p[0], y = (int16_t)(p[0] >> 16), z = (int16_t)p[1];
     sVx = x; sVy = y; sVz = z;
-    if (sClipDirty) update_clip();
+    update_clip_fixed();
     volatile u32 *r = IO(0x620);
     for (int k = 0; k < 4; k++)
         r[k] = (u32)(s32)(((s64)x * sClip[k] + (s64)y * sClip[4 + k] + (s64)z * sClip[8 + k] + ((s64)sClip[12 + k] << 12)) >> 12);
@@ -537,8 +557,10 @@ void port_gx_fifo_write(u32 word) {
 
 uint64_t gG3Ticks;  // (profiling: CPU time in the geometry engine, display lists and register writes)
 uint64_t port_ctr_ticks(void);
+uint32_t gG3Sends;  // (calls, per log period)
 void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
     (void)dest;
+    gG3Sends++;
     uint64_t t = port_ctr_ticks();
     init_once();
     const u32 *s = src, *end = s + bytes / 4;

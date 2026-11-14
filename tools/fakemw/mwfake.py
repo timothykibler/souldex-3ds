@@ -42,6 +42,9 @@ if datasrc and out and out.endswith(".o"):
         with open(tmp, "w") as f:
             f.write(convert(pp.stdout))
         r = subprocess.run(base + ["-c", "-x", "assembler", tmp, "-o", out])
+        # (gone afterwards: beside a NARC member's object, in its .narc.p folder, the packer counted
+        # it as a member too, doubling the zone_event and mmodel indices: no map's warps were its own)
+        os.remove(tmp)
     else:
         r = subprocess.run(base + ["-c", "-x", "c", "-std=gnu99", srcs[0], "-o", out])
     if r.returncode == 0 and "-MD" in args:

@@ -162,7 +162,7 @@ OVDISPATCH_WRAPS = []
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
-           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx,--wrap=Handle3DBufferSwapRequest",
+           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx,--wrap=Handle3DBufferSwapRequest,--wrap=CallFieldTask_ContinueGame_Normal,--wrap=SysTask_CreateOnVBlankQueue",
            ] + [f"-Wl,--wrap={w}" for w in OVDISPATCH_WRAPS] + [
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]

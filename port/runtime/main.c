@@ -70,6 +70,22 @@ static void setup_system_area(void) {
 extern void NitroMain(void);
 extern void port_run_main_sinit(void);
 
+// debug.txt "warp FRAME MAP X Z": at that frame, the game's own warp (as a script's) to there,
+// facing north, for testing a place without walking to it. (The field system kept from Continue.)
+int port_warp_frame = -1, port_warp_map, port_warp_x, port_warp_z;
+static void *sFieldSystem;
+void *__real_CallFieldTask_ContinueGame_Normal(void *fieldSystem);
+void *__wrap_CallFieldTask_ContinueGame_Normal(void *fieldSystem) {
+    sFieldSystem = fieldSystem;
+    return __real_CallFieldTask_ContinueGame_Normal(fieldSystem);
+}
+void *sub_020538C0(void *fieldSystem, u32 mapId, int warpId, int x, int y, int direction);
+void port_debug_warp_frame(void) {
+    if (port_warp_frame < 0 || port_frame_count != (u32)port_warp_frame || !sFieldSystem) return;
+    port_log("warp: map %d (%d, %d)\n", port_warp_map, port_warp_x, port_warp_z);
+    sub_020538C0(sFieldSystem, (u32)port_warp_map, -1, port_warp_x, port_warp_z, 0);
+}
+
 int main(void) {
     gfxInitDefault();
     osSetSpeedupEnable(true);  // (New 3DS: 804 MHz and the L2 cache)
@@ -109,7 +125,7 @@ int main(void) {
         extern uint32_t port_dump_every;
         char line[64];
         while (fgets(line, sizeof(line), dbg)) {
-            unsigned n, m, per;
+            unsigned n, m, per, q;
             char key[16];
             if (sscanf(line, "dump %u", &n) == 1) port_dump_every = n;
             else if (!strncmp(line, "wavdump", 7)) {  // ("wavdump [F]": 30 s of sound from frame F)
@@ -127,6 +143,7 @@ int main(void) {
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
             else if (sscanf(line, "snap %u", &n) == 1) { extern int port_g3_snap; port_g3_snap = (int)n; }
             else if (sscanf(line, "holes %u", &n) == 1) { extern int port_hole_fill; port_hole_fill = (int)n; }
+            else if (sscanf(line, "warp %u %u %u %u", &n, &m, &per, &q) == 4) { port_warp_frame = (int)n; port_warp_map = (int)m; port_warp_x = (int)per; port_warp_z = (int)q; }
             else if (sscanf(line, "double %u", &n) == 1) { extern int port_double_speed; port_double_speed = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
@@ -150,3 +167,4 @@ int main(void) {
     NitroMain();
     port_fatal("NitroMain returned");
 }
+

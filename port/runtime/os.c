@@ -48,10 +48,10 @@ void port_input_update(void);
 static u64 sLastVblank;
 void port_render_start(void (*fn)(void));
 void port_render_wait(void);
-void port_vblank_irq_maybe(void) {
+static void vblank_irq(int force) {
     if (sInIrq || sIntrMode == OS_INTRMODE_IRQ_DISABLE || !sLastVblank) return;
     u64 now = port_ctr_ticks();
-    if (now - sLastVblank < 268111856ull / 60) return;
+    if (!force && now - sLastVblank < 268111856ull / 60) return;
     port_render_wait();  // (the VBlank handler changes video memory: the render core done with it first)
     sLastVblank = now;
     OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
@@ -59,6 +59,26 @@ void port_vblank_irq_maybe(void) {
     INTR_CHECK |= OS_IE_V_BLANK;
     extern void port_snd_arm9_messages(void);
     port_snd_arm9_messages();  // (sound alarms, as an interrupt would deliver them)
+}
+void port_vblank_irq_maybe(void) { vblank_irq(0); }
+
+// One-off VBlank tasks: the queue fills while the field loads (each model's textures are bound by
+// one), and on the DS the VBlank interrupt drains it every 16.7 ms however long the loading takes.
+// Here only ROM reads let it in, and with the ROM read cache they take too little time: the queue
+// overflowed, a task wasn't made (GF_AssertFail in sub_02069714) and a model never finished
+// loading: the doors, which wait for theirs before opening (no going into buildings). So a
+// frame's time passed counts here too, and a full queue gets its VBlank at once.
+typedef struct SysTask SysTask;
+typedef void (*SysTaskFunc)(SysTask *, void *);
+SysTask *__real_SysTask_CreateOnVBlankQueue(SysTaskFunc func, void *data, u32 priority);
+SysTask *__wrap_SysTask_CreateOnVBlankQueue(SysTaskFunc func, void *data, u32 priority) {
+    vblank_irq(0);
+    SysTask *t = __real_SysTask_CreateOnVBlankQueue(func, data, priority);
+    if (!t) {
+        vblank_irq(1);
+        t = __real_SysTask_CreateOnVBlankQueue(func, data, priority);
+    }
+    return t;
 }
 
 static u64 sGameTicks, sFrameEnter, sFrameExit;
@@ -134,7 +154,7 @@ void port_frame(void) {
         gProfPlanes = gProfSprites = gProf3d = gProf3dTex = gProf3dWide = gProf3dIds = 0;
         extern u64 gGpu2dWaitTicks;
         extern u64 gG3Ticks;
-        port_log("  geometry engine %lu us per frame (part of the game code)\n", (unsigned long)(gG3Ticks / 600 / 268));
+        { extern uint32_t gG3Sends; port_log("  geometry engine %lu us per frame (part of the game code), %lu sends\n", (unsigned long)(gG3Ticks / 600 / 268), (unsigned long)(gG3Sends / 600)); gG3Sends = 0; }
         gG3Ticks = 0;
         extern uint64_t gRenderWaitTicks;
         port_log("  waiting for the render core %lu us per frame\n", (unsigned long)(gRenderWaitTicks / 600 / 268));
@@ -161,6 +181,7 @@ void port_frame(void) {
     extern void port_strmtest_frame(void);
     port_strmtest_frame();
     run_alarms();
+    { extern void port_debug_warp_frame(void); port_debug_warp_frame(); }
     // The game's VBlank handler (OS_SetIrqFunction(OS_IE_V_BLANK, ...)): it does the frame's
     // transfers and sets the interrupt check flag the main loop waits for.
     port_stage = "frame: the game's VBlank handler";
