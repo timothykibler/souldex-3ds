@@ -17,3 +17,4 @@
 # (iCloud conflict copies)
 /build-3ds */
 __pycache__/
+.DS_Store
