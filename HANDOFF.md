@@ -69,6 +69,15 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    packing, H-blank DMA effects, mosaic, bitmap sprites, microphone, RTC uses UTC, VRAM bank
    remapping isn't modelled (each window is its own memory; a first attempt broke battles).
 
+## Testing on a 3DS without the SD card
+
+- Install over Wi-Fi: FBI -> Remote Install -> Receive URLs over the network, then
+  `python3 tools/send_cia.py <3DS IP>`.
+- Log over Wi-Fi: `sdmc:/3ds/soulsilver-3ds/netlog.txt` holding this computer's address, then
+  `python3 tools/recv_log.py` (prints and saves to captures/netlog.txt). Each start-up also sends
+  the previous run's last lines (log.prev.txt) and any new Luma crash dump's registers; resolve
+  them against `build-3ds/elves/<build ID>.elf`.
+
 ## Reference work found (2026-11-13)
 
 - **pspoke** (github.com/IbrahimIrfan/pspoke, GPL-3.0): SoulSilver + Platinum natively on PSP at

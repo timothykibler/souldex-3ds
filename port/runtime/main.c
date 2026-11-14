@@ -22,12 +22,17 @@ void port_log(const char *fmt, ...) {
         vprintf(fmt, ap);
         va_end(ap);
     }
+    char buf[512];
+    va_start(ap, fmt);
+    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n > (int)sizeof(buf) - 1) n = sizeof(buf) - 1;
     if (gLog) {
-        va_start(ap, fmt);
-        vfprintf(gLog, fmt, ap);
-        va_end(ap);
+        fputs(buf, gLog);
         fflush(gLog);
     }
+    void port_netlog_send(const char *s, int n);
+    port_netlog_send(buf, n);  // (to a computer over Wi-Fi, if netlog.txt names one: netlog.c)
 }
 
 void port_fatal(const char *fmt, ...) {
@@ -70,10 +75,13 @@ int main(void) {
     osSetSpeedupEnable(true);  // (New 3DS: 804 MHz and the L2 cache)
     mkdir("sdmc:/3ds", 0777);
     mkdir(PORT_DIR, 0777);
+    remove(PORT_DIR "/log.prev.txt");
+    rename(PORT_DIR "/log.txt", PORT_DIR "/log.prev.txt");  // (the previous run's, crash or not)
     gLog = fopen(PORT_DIR "/log.txt", "w");
 #ifndef PORT_BUILD_ID
 #define PORT_BUILD_ID "unknown"
 #endif
+    { void port_netlog_init(const char *build); port_netlog_init(PORT_BUILD_ID); }
     port_log("SoulSilver 3DS, build %s\n", PORT_BUILD_ID);  // (build-3ds/elves/<this>.elf is its program: for crash dumps)
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
