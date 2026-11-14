@@ -162,7 +162,7 @@ OVDISPATCH_WRAPS = []
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
-           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx",
+           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx,--wrap=Handle3DBufferSwapRequest",
            ] + [f"-Wl,--wrap={w}" for w in OVDISPATCH_WRAPS] + [
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]
@@ -224,8 +224,12 @@ def main():
     run([DKA.replace("arm-none-eabi-", "") + "../../tools/bin/smdhtool", "--create", "SoulSilver 3DS",
          "Phase 0 port (pokeheartgold)", "personal build", f"{ROOT}/port/icon.png", f"{B}/soulsilver.smdh"],
         stdout=subprocess.DEVNULL)
-    run(["/opt/devkitpro/tools/bin/3dsxtool", elf, f"{B}/soulsilver.3dsx", f"--smdh={B}/soulsilver.smdh"])
-    print("built build-3ds/soulsilver.3dsx")
+    # (the .3dsx is optional, for the Homebrew Launcher: 3dsxtool refuses this ELF, "Unaligned
+    # relocation!", and the CIA, made from the ELF by port/package.sh, doesn't need it)
+    if subprocess.run(["/opt/devkitpro/tools/bin/3dsxtool", elf, f"{B}/soulsilver.3dsx", f"--smdh={B}/soulsilver.smdh"]).returncode:
+        print("no .3dsx (3dsxtool refused the ELF); the ELF is built: port/package.sh makes the CIA")
+    else:
+        print("built build-3ds/soulsilver.3dsx")
 
 
 if __name__ == "__main__":

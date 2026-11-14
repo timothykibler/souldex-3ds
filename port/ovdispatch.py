@@ -33,7 +33,7 @@ def generate(objdir, out):
     at = collections.defaultdict(set)             # DS address -> {(overlay, symbol)}
     for line in nm(["--defined-only"], files):
         p = line.split()
-        if len(p) != 3 or p[1] not in "Tt":
+        if len(p) != 3 or p[1] != "T":  # (global functions only: a local one can't be linked to by name)
             continue
         obj, sym = p[0].rsplit(":", 1)[0], p[2]
         m = NAME.match(sym)

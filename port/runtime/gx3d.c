@@ -87,6 +87,18 @@ static void apply(void (*op)(Mtx, const void *), const void *arg, int vecToo) {
 static void op_load(Mtx m, const void *arg) { memcpy(m, arg, sizeof(Mtx)); }
 static void op_mult(Mtx m, const void *arg) { mtx_mul(m, (const s32 *)arg, m); }
 static void op_identity(Mtx m, const void *arg) { (void)arg; mtx_identity(m); }
+// (SCALE and TRANS as the full multiply would do them, touching only what changes: S * M scales
+// rows 0-2; T * M adds tx row0 + ty row1 + tz row2 to row 3. The same sums, the same >> 12.)
+static void op_scale(Mtx m, const void *arg) {
+    const s32 *sc = arg;
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 4; c++) m[r * 4 + c] = (s32)(((s64)sc[r] * m[r * 4 + c]) >> 12);
+}
+static void op_trans(Mtx m, const void *arg) {
+    const s32 *t = arg;
+    for (int c = 0; c < 4; c++)
+        m[12 + c] = (s32)(((s64)t[0] * m[c] + (s64)t[1] * m[4 + c] + (s64)t[2] * m[8 + c] + ((s64)m[12 + c] << 12)) >> 12);
+}
 
 // ---------------------------------------------------------------- vertex state
 static u32 sColor = 0x7FFF;             // vertex colour, 15-bit
@@ -173,6 +185,22 @@ static void emit_triangles(const G3Vtx *v, int n) {
     p->count += ntri * 3;
 }
 
+// Vertices to whole DS pixels, as the DS's rasterizer has them (its screen coordinates are
+// integers): the map's separately built pieces meet at corners a fraction of a pixel apart, and
+// the 3DS GPU, placing them exactly, left hairline cracks between them (the clear colour through,
+// outlined black by edge marking). Rounded to the same pixel, the corners coincide as on the DS.
+// (In clip space, x / w and y / w to the viewport's pixel grid and back; far outside the screen,
+// left alone. debug.txt "snap 0" turns it off, to compare.)
+int port_g3_snap = 0;  // (off: it didn't close the holes (see hole_fill in gpu2d.c) and cost a fifth of the geometry engine's time)
+static void snap_to_pixels(G3Vtx *v) {
+    const u8 *vp = sFrames[sBuild].viewport;
+    float hw = (vp[2] - vp[0] + 1) * 0.5f, hh = (vp[3] - vp[1] + 1) * 0.5f;
+    float nx = v->x / v->w, ny = v->y / v->w;
+    if (nx < -8 || nx > 8 || ny < -8 || ny > 8 || hw <= 0 || hh <= 0) return;
+    v->x = (floorf((nx + 1) * hw + 0.5f) / hw - 1) * v->w;
+    v->y = (floorf((ny + 1) * hh + 0.5f) / hh - 1) * v->w;
+}
+
 static void add_vertex(s32 x, s32 y, s32 z) {
     sVx = x; sVy = y; sVz = z;
     if (sPrim < 0 || port_g3_prof == 2) return;
@@ -185,6 +213,7 @@ static void add_vertex(s32 x, s32 y, s32 z) {
     v.y = fx * M[1] + fy * M[5] + fz * M[9] + M[13];
     v.z = fx * M[2] + fy * M[6] + fz * M[10] + M[14];
     v.w = fx * M[3] + fy * M[7] + fz * M[11] + M[15];
+    if (port_g3_snap && v.w > 0) snap_to_pixels(&v);
     int r = sColor & 31, g = (sColor >> 5) & 31, b = (sColor >> 10) & 31;
     v.r = (u8)(r << 3 | r >> 2); v.g = (u8)(g << 3 | g >> 2); v.b = (u8)(b << 3 | b >> 2);
     int a = alpha_of(sPolyAttr);
@@ -231,10 +260,9 @@ static void normal(u32 p) {
         sTs = sS + (s32)(((s64)nx * sTex[0] + (s64)ny * sTex[4] + (s64)nz * sTex[8]) >> 21);
         sTt = sT + (s32)(((s64)nx * sTex[1] + (s64)ny * sTex[5] + (s64)nz * sTex[9]) >> 21);
     }
-    if (sClipDirty) update_clip();
     // the normal through the direction matrix (to .12)
     float n[3];
-    for (int k = 0; k < 3; k++) n[k] = ((float)nx * sVec[0 * 4 + k] + (float)ny * sVec[1 * 4 + k] + (float)nz * sVec[2 * 4 + k]) / (512.0f * 4096.0f);
+    for (int k = 0; k < 3; k++) n[k] = ((float)nx * sVec[0 * 4 + k] + (float)ny * sVec[1 * 4 + k] + (float)nz * sVec[2 * 4 + k]) * (1.0f / (512.0f * 4096.0f));
     float dif[3] = { (float)(sDifAmb & 31), (float)((sDifAmb >> 5) & 31), (float)((sDifAmb >> 10) & 31) };
     float amb[3] = { (float)((sDifAmb >> 16) & 31), (float)((sDifAmb >> 21) & 31), (float)((sDifAmb >> 26) & 31) };
     float spe[3] = { (float)(sSpeEmi & 31), (float)((sSpeEmi >> 5) & 31), (float)((sSpeEmi >> 10) & 31) };
@@ -242,7 +270,7 @@ static void normal(u32 p) {
     float out[3] = { emi[0], emi[1], emi[2] };
     for (int i = 0; i < 4; i++) {
         if (!(sPolyAttr & (1u << i))) continue;
-        float L[3] = { sLightVec[i][0] / 4096.0f, sLightVec[i][1] / 4096.0f, sLightVec[i][2] / 4096.0f };
+        float L[3] = { sLightVec[i][0] * (1.0f / 4096.0f), sLightVec[i][1] * (1.0f / 4096.0f), sLightVec[i][2] * (1.0f / 4096.0f) };
         float d = -(L[0] * n[0] + L[1] * n[1] + L[2] * n[2]);
         if (d < 0) d = 0;
         float H[3] = { (L[0] + 0) / 2, (L[1] + 0) / 2, (L[2] - 1) / 2 };
@@ -252,7 +280,7 @@ static void normal(u32 p) {
         if (sp > 1) sp = 1;
         if (sUseShininess) sp = sShininess[(int)(sp * 127)] / 256.0f;
         float lc[3] = { (float)(sLightColor[i] & 31), (float)((sLightColor[i] >> 5) & 31), (float)((sLightColor[i] >> 10) & 31) };
-        for (int c = 0; c < 3; c++) out[c] += (dif[c] * d + spe[c] * sp + amb[c]) * lc[c] / 31.0f;
+        for (int c = 0; c < 3; c++) out[c] += (dif[c] * d + spe[c] * sp + amb[c]) * lc[c] * (1.0f / 31.0f);
     }
     int r = out[0] > 31 ? 31 : (int)out[0], g = out[1] > 31 ? 31 : (int)out[1], b = out[2] > 31 ? 31 : (int)out[2];
     sColor = (u32)(r | g << 5 | b << 10);
@@ -390,14 +418,12 @@ static void run_cmd(u8 cmd, const u32 *p) {
         apply(op_mult, m, 1);
         break;
     case 0x1B:  // scale (in mode 2, only the position matrix)
-        mtx_identity(m);
-        m[0] = (s32)p[0]; m[5] = (s32)p[1]; m[10] = (s32)p[2];
-        apply(op_mult, m, 0);
+        m[0] = (s32)p[0]; m[1] = (s32)p[1]; m[2] = (s32)p[2];
+        apply(op_scale, m, 0);
         break;
     case 0x1C:
-        mtx_identity(m);
-        m[12] = (s32)p[0]; m[13] = (s32)p[1]; m[14] = (s32)p[2];
-        apply(op_mult, m, 1);
+        m[0] = (s32)p[0]; m[1] = (s32)p[1]; m[2] = (s32)p[2];
+        apply(op_trans, m, 1);
         break;
     case 0x20: sColor = p[0] & 0x7FFF; break;
     case 0x21: normal(p[0]); break;

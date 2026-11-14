@@ -155,19 +155,26 @@ static int load_db(const char *path) {
 }
 
 // ---------------------------------------------------------------- display settings
-extern int port_display_fill, port_side_fill, port_stereo_enabled, port_seam_fill;
+extern int port_display_fill, port_side_fill, port_stereo_enabled, port_seam_fill, port_wide_mode, port_hud_on;
 static void save_settings(void) {
     FILE *f = fopen(PORT_DIR "/settings.txt", "w");
     if (!f) return;
-    fprintf(f, "screen %s\nsides %s\n3d %s\nseams %s\n", port_display_fill ? "fill" : "1:1", port_side_fill ? "continue" : "black", port_stereo_enabled ? "on" : "off", port_seam_fill ? "filled" : "off");
+    fprintf(f, "version 3\nhud %s\n", port_hud_on ? "on" : "off");
+    fprintf(f, "screen %s\nsides %s\n3d %s\nseams %s\nwide %s\n", port_display_fill ? "fill" : "1:1", port_side_fill ? "continue" : "black", port_stereo_enabled ? "on" : "off", port_seam_fill ? "filled" : "off", port_wide_mode ? "on" : "off");
     fclose(f);
 }
 static void load_settings(void) {
     FILE *f = fopen(PORT_DIR "/settings.txt", "r");
     if (!f) return;
     char line[64];
+    // (settings from before version 3 are dropped: the defaults changed (1:1, widened 3D, no seam
+    // fill; the cracks the seam fill hid are closed by rounding vertices now) and the old file
+    // would keep the old ones)
+    if (!fgets(line, sizeof(line), f) || strncmp(line, "version 3", 9)) { fclose(f); return; }
     while (fgets(line, sizeof(line), f)) {
-        if (!strncmp(line, "screen fill", 11)) port_display_fill = 1;
+        if (!strncmp(line, "hud on", 6)) port_hud_on = 1;
+        else if (!strncmp(line, "hud off", 7)) port_hud_on = 0;
+        else if (!strncmp(line, "screen fill", 11)) port_display_fill = 1;
         else if (!strncmp(line, "screen 1:1", 10)) port_display_fill = 0;
         else if (!strncmp(line, "sides continue", 14)) port_side_fill = 1;
         else if (!strncmp(line, "sides black", 11)) port_side_fill = 0;
@@ -175,6 +182,8 @@ static void load_settings(void) {
         else if (!strncmp(line, "3d off", 6)) port_stereo_enabled = 0;
         else if (!strncmp(line, "seams filled", 12)) port_seam_fill = 1;
         else if (!strncmp(line, "seams off", 9)) port_seam_fill = 0;
+        else if (!strncmp(line, "wide on", 7)) { if (!port_wide_mode) port_wide_mode = 1; }
+        else if (!strncmp(line, "wide off", 8)) port_wide_mode = 0;
     }
     fclose(f);
 }
@@ -318,7 +327,7 @@ typedef struct { int folder, cheat; } Row;
 static Row *sRows;
 static int sNumRows;
 
-#define NUM_SETTINGS 4
+#define NUM_SETTINGS 7
 static void build_rows(void) {
     if (!sRows) sRows = malloc(sizeof(Row) * (size_t)(sNumCheats + sNumFolders + NUM_SETTINGS + 1));
     sNumRows = 0;
@@ -340,10 +349,13 @@ static void draw_menu(int cur, int top) {
         const Row *w = &sRows[r];
         const char *mark = r == cur ? "\x1b[33m>" : " ";
         if (w->folder == -2) {
-            if (w->cheat == 0) printf("%s Top screen: %s\x1b[0m\n", mark, port_display_fill ? "fill (1.25x, soft)" : "1:1 (exact pixels)");
+            if (w->cheat == 0) printf("%s Screens: %s\x1b[0m\n", mark, port_display_fill ? "fill (1.25x, soft)" : "1:1 (exact pixels)");
             else if (w->cheat == 1) printf("%s Sides (fill): %s\x1b[0m\n", mark, port_side_fill ? "continue picture" : "black");
             else if (w->cheat == 2) printf("%s 3D (slider, 1:1): %s\x1b[0m\n", mark, port_stereo_enabled ? "on" : "off (faster)");
-            else printf("%s 3D seams: %s\x1b[0m\n", mark, port_seam_fill ? "filled (as the DS)" : "off (faster)");
+            else if (w->cheat == 3) printf("%s 3D seams: %s\x1b[0m\n", mark, port_seam_fill ? "filled (as the DS)" : "off (faster)");
+            else if (w->cheat == 4) printf("%s Widescreen 3D: %s\x1b[0m\n", mark, port_wide_mode ? "on" : "off (DS picture only)");
+            else if (w->cheat == 5) printf("%s Frame counter: %s\x1b[0m\n", mark, port_hud_on ? "on" : "off");
+            else { extern int port_double_speed; printf("%s Speed: %s\x1b[0m\n", mark, port_double_speed ? "double (60 fps, as unlocked)" : "normal (30 fps, as the DS)"); }
             continue;
         }
         if (w->cheat < 0) printf("%s%s %.34s\x1b[0m\n", mark, sFolders[w->folder].open ? "-" : "+", sFolders[w->folder].name);
@@ -406,7 +418,7 @@ static void menu(void) {
         if ((down & KEY_A) && sNumRows) {
             Row w = sRows[cur];
             if (w.folder == -2) {
-                if (w.cheat == 0) port_display_fill ^= 1; else if (w.cheat == 1) port_side_fill ^= 1; else if (w.cheat == 2) port_stereo_enabled ^= 1; else port_seam_fill ^= 1;
+                if (w.cheat == 0) port_display_fill ^= 1; else if (w.cheat == 1) port_side_fill ^= 1; else if (w.cheat == 2) port_stereo_enabled ^= 1; else if (w.cheat == 3) port_seam_fill ^= 1; else if (w.cheat == 4) port_wide_mode = !port_wide_mode; else if (w.cheat == 5) port_hud_on ^= 1; else { extern int port_double_speed; port_double_speed ^= 1; }
                 save_settings();
             } else if (w.cheat < 0) {
                 sFolders[w.folder].open ^= 1;

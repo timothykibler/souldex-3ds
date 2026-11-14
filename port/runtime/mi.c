@@ -28,11 +28,9 @@ void MIi_CpuClear32(u32 data, void *destp, u32 size) {
 void MIi_CpuCopy32(const void *srcp, void *destp, u32 size) { memmove(destp, srcp, size & ~3u); }
 void MIi_CpuSend32(const void *srcp, volatile void *destp, u32 size) {
     const u32 *s = srcp;
-    if (is_gxfifo(destp)) {
-        extern u64 gG3Ticks;
-        u64 t = port_ctr_ticks();
-        for (u32 i = 0; i < size / 4; i++) port_gx_fifo_write(s[i]);
-        gG3Ticks += port_ctr_ticks() - t;
+    if (is_gxfifo(destp)) {  // (display lists: decoded in place, see port_gx_fifo_send; it times itself)
+        void port_gx_fifo_send(const void *src, void *dest, u32 bytes);
+        port_gx_fifo_send(s, (void *)destp, size & ~3u);
         return;
     }
     for (u32 i = 0; i < size / 4; i++) *(vu32 *)destp = s[i];

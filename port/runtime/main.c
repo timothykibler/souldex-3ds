@@ -82,6 +82,17 @@ int main(void) {
 #define PORT_BUILD_ID "unknown"
 #endif
     { void port_netlog_init(const char *build); port_netlog_init(PORT_BUILD_ID); }
+    {  // (the CPU's clock, measured: 10 M turns of a two-instruction loop, about 2 cycles each on the ARM11)
+        u64 t0 = svcGetSystemTick();
+        u32 n = 10000000;
+        __asm__ volatile("1: subs %0, %0, #1\n bne 1b" : "+r"(n) : : "cc");
+        u64 dt = svcGetSystemTick() - t0;
+        extern unsigned port_cpu_mhz;
+        port_cpu_mhz = (unsigned)(20000000ull * SYSCLOCK_ARM11 / dt / 1000000);
+        bool n3ds = false;
+        APT_CheckNew3DS(&n3ds);
+        port_log("cpu: about %u MHz (New 3DS: %s)\n", port_cpu_mhz, n3ds ? "yes" : "no");
+    }
     port_log("SoulSilver 3DS, build %s\n", PORT_BUILD_ID);  // (build-3ds/elves/<this>.elf is its program: for crash dumps)
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
@@ -114,6 +125,9 @@ int main(void) {
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
+            else if (sscanf(line, "snap %u", &n) == 1) { extern int port_g3_snap; port_g3_snap = (int)n; }
+            else if (sscanf(line, "holes %u", &n) == 1) { extern int port_hole_fill; port_hole_fill = (int)n; }
+            else if (sscanf(line, "double %u", &n) == 1) { extern int port_double_speed; port_double_speed = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
             else if (sscanf(line, "mash %u %u %u %15s", &n, &m, &per, key) == 4) {

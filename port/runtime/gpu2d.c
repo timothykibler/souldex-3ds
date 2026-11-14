@@ -57,23 +57,24 @@ static float sOX, sOY;  // (offset added to every quad: 0, the projection places
 // what's inside the DS frame lands exactly where it would, at the same scale as the 2D, and the
 // rest shows more of the scene; the 3D is drawn at the screen's own resolution.
 // (debug.txt "scale1": 1:1 whatever the setting, for the comparison with the software renderer.)
-int port_wide_mode = 1;    // 0 never, 1 when the scene is 3D-backed, 2 always (debug.txt "wide N")
+int port_wide_mode = 1;    // 0 never (the DS picture as it is), 1 when the scene is 3D-backed (default), 2 always (debug.txt "wide N")
 int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)
 int port_scale1;
 int port_display_fill;     // 1.25x fill (else 1:1)
 int port_side_fill;        // in fill mode, the top screen's sides continue the picture
 int port_display_scaled(void) { return port_display_fill && !port_scale1; }  // (the top screen)
-int port_bottom_scaled(void) { return !port_scale1; }  // (the bottom screen always fills: its menus have nothing beyond their edges)
+int port_bottom_scaled(void) { return port_display_fill && !port_scale1; }  // (the bottom screen follows the top: 1:1 exact pixels, or fill)
 float port_g3_wide = 1.0f, port_g3_wide_y = 1.0f;  // view size over the DS's (the geometry engine's box test)
 static float sScale = 1.25f;
 static int sSS = 1;     // the screen being drawn's composition supersampling (2 when scaled, 1 exact)
 static int sSSTop = 2;  // the top screen's
-static int sSSBot = 2;  // the bottom's: it always fills, at 2x, except while the 3D slider is up (bottom_ss_wanted)
+static int sSSBot = 2;  // the bottom's: 2 when it fills, 1 at 1:1 (bottom_ss_wanted)
 static float sL, sT, sW, sH;  // the screen being drawn, in DS pixels: left, top, width, height
 static int sScrW;             // its width in screen pixels
 static int sFbH = 240;        // the target's short side (its rows, rotated): 240, or 192 for the DS-size intermediate
 static int sWide;             // this frame's 3D layer is widened
 static int sMargins;          // the top screen's sides continue the DS picture's edge columns (not widened)
+static int sExtend;           // this engine's 3D is widened: full-width 2D rows (a wipe's bars) and windows reaching the edges go on to the screen's
 static C3D_Tex sShade;        // (the sides' darkening: alpha rising outwards)
 static void scissor_ds(int whole);
 static void layout(int screenW);
@@ -625,6 +626,71 @@ static bool init3d(void);
 static bool alloc3d(void);
 static void free3d(void);
 
+// The DS picture's outermost texels carried out to the screen's edges: the layer drawn over the
+// DS rectangle with texture coordinates (u0, v0) at its top-left and (u1, v1) at its bottom-right;
+// left and right, above and below, and the corners.
+static void extend_edges(float u0, float v0, float u1, float v1) {
+    float uL = u0 + (u1 - u0) * (0.5f / 256), uR = u0 + (u1 - u0) * (255.5f / 256);
+    float vT = v0 + (v1 - v0) * (0.5f / 192), vB = v0 + (v1 - v0) * (191.5f / 192);
+    float L = sL, R = sL + sW, T = sT, B = sT + sH;
+    scissor_ds(1);
+    if (L < 0) quad(L, 0, 0, 192, uL, v0, uL, v1);
+    if (R > 256) quad(256, 0, R, 192, uR, v0, uR, v1);
+    if (T < 0) {
+        quad(0, T, 256, 0, u0, vT, u1, vT);
+        if (L < 0) quad(L, T, 0, 0, uL, vT, uL, vT);
+        if (R > 256) quad(256, T, R, 0, uR, vT, uR, vT);
+    }
+    if (B > 192) {
+        quad(0, 192, 256, B, u0, vB, u1, vB);
+        if (L < 0) quad(L, 192, 0, B, uL, vB, uL, vB);
+        if (R > 256) quad(256, 192, R, B, uR, vB, uR, vB);
+    }
+    scissor_ds(0);
+}
+
+// Widened: each row of a text BG whose outermost pixel is opaque, carried out to the screen's edge
+// on that side (a wipe's bars, sliding in from either side, then closing; a full-screen panel),
+// and the top and bottom rows, opaque at both ends, above and below the DS picture likewise.
+// Rows stopping short of an edge (a text box) stay in the DS picture.
+static void extend_full_rows(Plane *p, int hofs, int vofs) {
+    const int W = p->w, H = p->h;
+    u16 *d = p->tex.data;
+    float L = sL, R = sL + sW, T = sT, B = sT + sH;
+    float uL = (hofs + 0.5f) / W, uR = (hofs + 255.5f) / W;
+    u8 edge[192];  // bit 0: the leftmost pixel opaque, bit 1: the rightmost
+    for (int y = 0; y < 192; y++) {
+        int ty = (vofs + y) % H;
+        edge[y] = (u8)((*tex_px(d, W, H, hofs % W, ty) & 1) | (*tex_px(d, W, H, (hofs + 255) % W, ty) & 1) << 1);
+    }
+    scissor_ds(1);
+    for (int side = 0; side < 2; side++) {
+        if (side == 0 ? L >= 0 : R <= 256) continue;
+        for (int y = 0; y < 192;) {
+            if (!(edge[y] >> side & 1)) { y++; continue; }
+            int y1 = y;
+            while (y1 < 192 && (edge[y1] >> side & 1)) y1++;
+            float v0 = (float)(vofs + y) / H, v1 = (float)(vofs + y1) / H;
+            if (side == 0) quad(L, y, 0, y1, uL, v0, uL, v1);
+            else quad(256, y, R, y1, uR, v0, uR, v1);
+            y = y1;
+        }
+    }
+    if (T < 0 && edge[0] == 3) {
+        float v = (vofs + 0.5f) / H;
+        quad(0, T, 256, 0, (float)hofs / W, v, (hofs + 256.0f) / W, v);
+        if (L < 0) quad(L, T, 0, 0, uL, v, uL, v);
+        if (R > 256) quad(256, T, R, 0, uR, v, uR, v);
+    }
+    if (B > 192 && edge[191] == 3) {
+        float v = (vofs + 191.5f) / H;
+        quad(0, 192, 256, B, (float)hofs / W, v, (hofs + 256.0f) / W, v);
+        if (L < 0) quad(L, 192, 0, B, uL, v, uL, v);
+        if (R > 256) quad(256, 192, R, B, uR, v, uR, v);
+    }
+    scissor_ds(0);
+}
+
 static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
@@ -648,13 +714,10 @@ static void bg_quads(void *arg) {
     if (d->kind == 0) {
         float hofs = rd16(e->io + 0x10 + d->bg * 4) & 0x1FF, vofs = rd16(e->io + 0x12 + d->bg * 4) & 0x1FF;
         quad(0, 0, 256, 192, hofs / p->w, vofs / p->h, (hofs + 256) / p->w, (vofs + 192) / p->h);
-        if (sMargins) {  // (each row's outermost pixel, carried out to the screen's edges)
-            float uL = (hofs + 0.5f) / p->w, uR = (hofs + 255.5f) / p->w;
-            scissor_ds(1);
-            quad(sL, 0, 0, 192, uL, vofs / p->h, uL, (vofs + 192) / p->h);
-            quad(256, 0, sL + sW, 192, uR, vofs / p->h, uR, (vofs + 192) / p->h);
-            scissor_ds(0);
-        }
+        if (sMargins)  // (each row's outermost pixel, carried out to the screen's edges)
+            extend_edges(hofs / p->w, vofs / p->h, (hofs + 256) / p->w, (vofs + 192) / p->h);
+        else if (sExtend)
+            extend_full_rows(p, (int)hofs, (int)vofs);
     } else {
         const u8 *r = e->io + 0x20 + (d->bg - 2) * 0x10;
         float pa = (int16_t)rd16(r) / 256.0f, pb = (int16_t)rd16(r + 2) / 256.0f;
@@ -763,7 +826,13 @@ static void windows_to_stencil(const Eng *e, int windows, int ei) {
         int ys[2][2], ny = 0, xs[2][2], nx = 0;
         if (y0 <= y1) { ys[ny][0] = y0; ys[ny++][1] = y1; } else { ys[ny][0] = y0; ys[ny++][1] = 192; ys[ny][0] = 0; ys[ny++][1] = y1; }
         if (x0 <= x1) { xs[nx][0] = x0; xs[nx++][1] = x1; } else { xs[nx][0] = x0; xs[nx++][1] = 256; xs[nx][0] = 0; xs[nx++][1] = x1; }
+        if (sExtend) {  // (a window reaching the DS picture's edge goes on to the screen's)
+            for (int k = 0; k < ny; k++) { if (ys[k][0] == 0) ys[k][0] = (int)sT - 1; if (ys[k][1] == 192) ys[k][1] = (int)(sT + sH) + 1; }
+            for (int k = 0; k < nx; k++) { if (xs[k][0] == 0) xs[k][0] = (int)sL - 1; if (xs[k][1] == 256) xs[k][1] = (int)(sL + sW) + 1; }
+            scissor_ds(1);
+        }
         for (int a = 0; a < ny; a++) for (int b = 0; b < nx; b++) fill(xs[b][0], ys[a][0], xs[b][1], ys[a][1]);
+        if (sExtend) scissor_ds(0);
     }
     C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_ALL);  // (on: the depth-stencil buffer is only written with it)
 }
@@ -879,6 +948,7 @@ static void render_engine_layers(Eng *e, C3D_RenderTarget *t, int screenW) {
     mx.eva = bldalpha & 31; mx.evb = (bldalpha >> 8) & 31; mx.evy = rd16(e->io + 0x54) & 31;
     if (mx.evy > 16) mx.evy = 16;
     mx.windows = (e->dispcnt >> 13) & 7;
+    sExtend = wide3d;
     u16 winin = rd16(e->io + 0x48), winout = rd16(e->io + 0x4A);
     mx.regionMask[0] = winout & 0x3F; mx.regionMask[1] = (winout >> 8) & 0x3F;
     mx.regionMask[2] = (winin >> 8) & 0x3F; mx.regionMask[3] = winin & 0x3F;
@@ -1000,6 +1070,69 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     if (sDsPass) { ds_final(t, screenW); sDsPass = 0; }
 }
 
+// ---------------------------------------------------------------- the frame counter
+// Top-left of the top screen (in the black border at 1:1): the game's frames per second, the
+// GPU's drawing time per frame, the game code's (CPU core 1) and the render core's (2D and 3D
+// layer building, core 2), in ms, averaged over each second. Settings menu: "Frame counter".
+int port_hud_on = 1;
+extern volatile unsigned port_hud_fps;
+extern volatile float port_hud_cpu_ms, port_hud_wait_ms, port_hud_sd_ms;
+static float sHudGpuAcc, sHudRenAcc, sHudGpuMs, sHudRenMs;
+static int sHudN;
+static u64 sHudT;
+static void hud_measure(float gpuMs, u64 renTicks) {
+    sHudGpuAcc += gpuMs; sHudRenAcc += renTicks / 268111.856f; sHudN++;
+    u64 now = svcGetSystemTick();
+    if (now - sHudT >= 268111856ull) {
+        sHudGpuMs = sHudGpuAcc / sHudN; sHudRenMs = sHudRenAcc / sHudN;
+        sHudGpuAcc = sHudRenAcc = 0; sHudN = 0; sHudT = now;
+    }
+}
+static u16 glyph(char c) {  // 3x5, rows top down, 3 bits each (left = high)
+    static const u16 digits[10] = { 075557, 026227, 071747, 071717, 055711, 074717, 074757, 071111, 075757, 075717 };
+    if (c >= '0' && c <= '9') return digits[c - '0'];
+    switch (c) {
+    case '.': return 000002; case 'F': return 074644; case 'P': return 075744; case 'S': return 074717;
+    case 'G': return 074557; case 'U': return 055557; case 'C': return 074447; case 'R': return 065655;
+    case 'E': return 074647; case 'N': return 057755; case 'W': return 055775; case 'A': return 075755;
+    case 'I': return 072227; case 'D': return 065556; case 'L': return 044447; case 'K': return 055655; default: return 0;
+    }
+}
+static void hud_text(int x, int y, const char *s) {
+    for (; *s; s++, x += 8) {
+        u16 g = glyph(*s);
+        for (int r = 0; r < 5; r++)
+            for (int c = 0; c < 3; c++)
+                if (g >> ((4 - r) * 3 + (2 - c)) & 1) fill(x + c * 2, y + r * 2, x + c * 2 + 2, y + r * 2 + 2);
+    }
+}
+static void draw_hud(C3D_RenderTarget *t) {
+    C3D_FrameDrawOn(t);
+    layout(400);
+    C3D_Mtx proj;
+    Mtx_OrthoTilt(&proj, 0, 400, 240, 0, -1, 1, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
+    sOX = sOY = 0;
+    scissor_ds(1);
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    set_tev(TEV_FLAT, (int)0xB0000000u);
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+    fill(0, 0, 70, 88);
+    blend_off();
+    set_tev(TEV_FLAT, (int)0xFFFFFFFFu);
+    char line[16];
+    snprintf(line, sizeof(line), "FPS %u", port_hud_fps); hud_text(3, 3, line);
+    snprintf(line, sizeof(line), "GPU %.1f", (double)sHudGpuMs); hud_text(3, 15, line);
+    snprintf(line, sizeof(line), "CPU %.1f", (double)port_hud_cpu_ms); hud_text(3, 27, line);
+    snprintf(line, sizeof(line), "REN %.1f", (double)sHudRenMs); hud_text(3, 39, line);
+    snprintf(line, sizeof(line), "WAI %.1f", (double)port_hud_wait_ms); hud_text(3, 51, line);  // (the game kept waiting for the render core)
+    snprintf(line, sizeof(line), "SD %.1f", (double)port_hud_sd_ms); hud_text(3, 63, line);  // (reading the ROM)
+    { extern unsigned port_cpu_mhz; snprintf(line, sizeof(line), "CLK %u", port_cpu_mhz); hud_text(3, 75, line); }  // (the CPU's clock, MHz)
+    scissor_ds(0);
+}
+
 // ---------------------------------------------------------------- frames
 static bool sReady;
 
@@ -1015,19 +1148,12 @@ static u32 screen_transfer(int ss) {
 // changes: VRAM holds one size at a time).
 static void stereo_free(void);
 static bool make_targets_(int ss);
-// The bottom screen's supersampling: 2 (sharp, even 1.25x pixels), but 1 while stereoscopic 3D is
-// in use: VRAM holds the bottom's 2x target or the top screen's right eye, not both (6 MB). At 1x
-// the bottom still fills, a column and row in four doubled. (Slider read with some hysteresis:
-// changing it rebuilds VRAM, a frame's hitch.)
+// The bottom screen's supersampling: 2 when it fills (sharp, even 1.25x pixels, box-filtered by
+// the display transfer), 1 at 1:1 (exact as it is). Stereoscopic 3D, only at 1:1, gets the VRAM
+// the 2x target would take.
 extern int port_stereo_enabled;
 extern float port_stereo_force;
-static int bottom_ss_wanted(void) {
-    static int on;
-    float slider = port_stereo_force >= 0 ? port_stereo_force : osGet3DSliderState();
-    if (slider > 0.05f) on = 1;
-    else if (slider < 0.02f) on = 0;
-    return port_stereo_enabled && on && !port_display_scaled() ? 1 : 2;
-}
+static int bottom_ss_wanted(void) { return port_bottom_scaled() ? 2 : 1; }
 static int s3dReadyAtStart;
 // The screens' targets at a supersampling factor, and everything else in VRAM made again after
 // them (the 3D layer; the right eye comes back when wanted), so the layout is always the one
@@ -1146,7 +1272,8 @@ void port_gpu2d_frame(void) {
     u64 tw = svcGetSystemTick();
     port_stage = "render: waiting for the GPU (C3D_FrameBegin)";
     C3D_FrameBegin(0);  // (the GPU's previous frame finished; the pacing to the VBlank is the game thread's: port_ctr_frame_wait)
-    gGpuDrawUs += (u64)(C3D_GetDrawingTime() * 1000.0f);  // (the GPU's own time on the last frame, citro3d's measure)
+    float gpuMs = C3D_GetDrawingTime();
+    gGpuDrawUs += (u64)(gpuMs * 1000.0f);  // (the GPU's own time on the last frame, citro3d's measure)
     u64 t0 = svcGetSystemTick();
     gGpu2dWaitTicks += t0 - tw;
     sVtxUsed = 0;
@@ -1169,7 +1296,12 @@ void port_gpu2d_frame(void) {
         render_engine(&a, sTopR, 400);
         s3dCur = &s3dTex; sIdCur = &sIdTex; sRepeat = 0;
     }
+    if (port_hud_on) {
+        draw_hud(sTop);
+        if (sStereo && sTopR) draw_hud(sTopR);
+    }
     u64 dt = svcGetSystemTick() - t0;
+    hud_measure(gpuMs, dt);
     gGpu2dBusyTicks += dt;
     if (dt > gGpu2dMaxTicks) gGpu2dMaxTicks = dt;
     // (vertices the CPU wrote this frame, out of its data cache before the GPU reads them)
@@ -1329,7 +1461,7 @@ static G3Vtx *sFarQuad;  // (the viewport at the far plane, for the depth reset)
 typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
 static VE *sVboEdge;
 
-static void flush_edge_vertices(void) { if (sVboEdge) GSPGPU_FlushDataCache(sVboEdge, sizeof(VE) * 6 * 8); }
+static void flush_edge_vertices(void) { if (sVboEdge) GSPGPU_FlushDataCache(sVboEdge, sizeof(VE) * 6 * 12); }
 
 
 static void attrs_2d(void) {
@@ -1373,7 +1505,7 @@ static bool init3d(void) {
     sDvlbEdge = DVLB_ParseFile((u32 *)edge_shbin, edge_shbin_size);
     shaderProgramInit(&sProgEdge);
     shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
-    sVboEdge = linearAlloc(sizeof(VE) * 6 * 8);
+    sVboEdge = linearAlloc(sizeof(VE) * 6 * 12);  // (edge marking's 8 passes, then the hole fill's 4)
     sFarQuad = linearAlloc(sizeof(G3Vtx) * 6);
     if (sFarQuad) {  // (the viewport, just inside the far plane: depth ~0, the clear depth)
         static const float q[6][2] = { { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
@@ -1614,17 +1746,19 @@ static C3D_Tex *texture_for_(u32 teximage, u32 pltt, int s0, int s1, int t0, int
     return &e->tex;
 }
 
-// A polygon's texture-coordinate bounds (texels, from the geometry engine); beyond the texture
-// (repeating): all of it on that axis.
+// A polygon's texture-coordinate bounds (texels, from the geometry engine); reaching the
+// texture's edge, or beyond it (repeating): all of it on that axis. (A ground tile's coordinates
+// often run exactly from 0 to the texture's size; the 3DS GPU interpolates them a hair outside,
+// and with repeat that samples the texel across the wrap. Undecoded, it came out black: the
+// cracks between ground tiles on hardware, which Azahar, interpolating exactly, never showed.)
 int port_tex_whole;  // (debug.txt "texwhole": whole textures decoded, not the parts used)
 static void poly_st_bounds(const G3Frame *f, const G3Poly *p, int *s0, int *s1, int *t0, int *t1) {
     (void)f;
     int w = 8 << ((p->teximage >> 20) & 7), h = 8 << ((p->teximage >> 23) & 7);
     *s0 = (int)p->s0; *s1 = (int)p->s1 + 1; *t0 = (int)p->t0; *t1 = (int)p->t1 + 1;
     extern int port_tex_whole;
-    if (port_tex_whole || p->s0 < 0 || p->s1 > w) { *s0 = 0; *s1 = w; }
-    if (port_tex_whole) { *t0 = 0; *t1 = h; }
-    if (p->t0 < 0 || p->t1 > h) { *t0 = 0; *t1 = h; }
+    if (port_tex_whole || p->s0 < 1 || p->s1 > w - 1) { *s0 = 0; *s1 = w; }
+    if (port_tex_whole || p->t0 < 1 || p->t1 > h - 1) { *t0 = 0; *t1 = h; }
 }
 
 static GPU_TEXTURE_WRAP_PARAM wrap_of(int repeat, int flip) {
@@ -1840,6 +1974,54 @@ static void draw_edges(void) {
     C3D_TexBind(1, &sShade);
 }
 
+// ---------------------------------------------------------------- hole fill
+// The DS covers a pixel when a polygon's edge so much as touches it; the 3DS's GPU only when the
+// pixel's centre is inside. Where the map's pieces meet (corners, T-junctions), a pixel can then
+// belong to none of them: a pin-hole showing the clear colour, which edge marking rings in black
+// (the marks on hardware; Azahar, rasterizing differently, rarely showed them). So after the opaque
+// polygons, each pixel nothing was drawn on (its depth still the clear depth) takes a neighbour's
+// (right, left, down, up: the first drawn one). Four full-screen quads reading the image they
+// draw on: they only write holes, and only from drawn pixels (alpha, or the ID image's depth, > 0),
+// so reading a pixel before or after it was filled gives the same. The ID image likewise, before
+// the outlines. Silhouettes against the clear plane grow by a pixel there, as the DS's own edges
+// are generous. Not for orthographic scenes (flat sprites over 2D). debug.txt "holes 0" turns it off.
+int port_hole_fill = 1;
+static void hole_fill(C3D_Tex *img, int ids) {
+    C3D_BindProgram(&sProgEdge);
+    C3D_AttrInfo *ai = C3D_GetAttrInfo();
+    AttrInfo_Init(ai);
+    AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(ai, 1, GPU_FLOAT, 2);
+    AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+    C3D_BufInfo *bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    BufInfo_Add(bi, sVboEdge, sizeof(VE), 3, 0x210);
+    C3D_SetViewport(0, 0, (u32)(sW + 0.5f), (u32)(sH + 0.5f));
+    // (just nearer than the clear depth (0): passes only where nothing was drawn, and marks it drawn)
+    C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+    C3D_AlphaTest(true, GPU_GREATER, 0);
+    blend_off();
+    C3D_TexBind(0, img);
+    for (int s = 0; s < 6; s++) C3D_TexEnvInit(C3D_GetTexEnv(s));
+    C3D_TexEnv *e0 = C3D_GetTexEnv(0);
+    C3D_TexEnvSrc(e0, C3D_Both, GPU_TEXTURE0, 0, 0);
+    if (ids) C3D_TexEnvOpAlpha(e0, GPU_TEVOP_A_SRC_G, GPU_TEVOP_A_SRC_ALPHA, GPU_TEVOP_A_SRC_ALPHA);  // (drawn: depth G > 0)
+    C3D_TexEnvFunc(e0, C3D_Both, GPU_REPLACE);
+    const float U = sW / 512.0f, V = sH / 256.0f, z = -1.0f / 1024;
+    static const int nb[4][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } };
+    static const int idx[6] = { 0, 1, 2, 1, 3, 2 };
+    const int base = 6 * 8;
+    for (int d = 0; d < 4; d++) {
+        float du = nb[d][0] / 512.0f, dv = nb[d][1] / 256.0f;
+        VE c[4] = { { -1, -1, z, 1, du, dv, 0, 0 }, { 1, -1, z, 1, U + du, dv, 0, 0 },
+                    { -1, 1, z, 1, du, V + dv, 0, 0 }, { 1, 1, z, 1, U + du, V + dv, 0, 0 } };
+        VE *q = sVboEdge + base + d * 6;
+        for (int k = 0; k < 6; k++) q[k] = c[idx[k]];
+    }
+    C3D_DrawArrays(GPU_TRIANGLES, base, 24);
+    C3D_TexEnvInit(e0);
+}
+
 // Whether this frame's 3D is a scene to widen: the 3D layer on the top screen, over the whole DS
 // viewport, with opaque polygons covering all four corners of the DS frame (the overworld: the
 // map is the scene, 2D windows and text in front), as opposed to 3D sprites over 2D backgrounds
@@ -1868,26 +2050,47 @@ static int want_wide(const G3Frame *f, int screenW) {
     if (f->viewport[0] != 0 || f->viewport[2] != 255 || f->viewport[1] != 0 || f->viewport[3] != 191) return 0;
     u32 dispcnt = rd32(DS(0x04000000));
     if (!(dispcnt & 8) || !(dispcnt & 0x100)) return 0;
-    // (windows on: a wipe or another masked effect, drawn for the DS picture only: not widened)
-    if (dispcnt & 0xE000) { sWideNow = 1; return 0; }
+    // (windows on, a wipe or another masked effect: widened all the same, the windows and the 2D
+    // layers' edges carried out to the screen's edges, see sExtend)
     if (port_wide_mode == 2) return 1;
     // Does the 3D cover the widened screen, not just the DS picture? (The game builds only what
     // the DS's view needs: panning, the widened sides can be empty, black wedges.) The widened
     // screen's corners and edge midpoints, in the DS's clip space (it spans sW / 256 by sH / 192),
     // a few pixels in; one point a frame, the last result of each kept.
+    // Also the DS picture's own corners: covered there but not all the way out is the map scene
+    // with a widened corner not built yet (walking north, the next blocks load late: the top
+    // corners empty for a moment): 1, kept widened for a while (see wide_stable); not even the
+    // DS picture covered: 0, not a map scene (a battle).
     const float ex = sW / 256.0f * (1 - 4 / sW), ey = sH / 192.0f * (1 - 4 / sH);
     static const float px[8] = { -1, 1, -1, 1, -1, 1, 0, 0 }, py[8] = { 1, 1, -1, -1, 0, 0, 1, -1 };
-    static u8 hit[8];
-    static int next;
+    // (a DS corner counts as empty only when two samples in a row missed, at two points a little
+    // apart: one sample can land in a pin-hole between the map's pieces (see hole_fill), and a
+    // single miss switched widening off while walking: the black sides)
+    static u8 hit[8], missDs[4];
+    static int next, round;
     hit[next] = (u8)covers(f, px[next] * ex, py[next] * ey);
-    next = (next + 1) & 7;
-    for (int k = 0; k < 8; k++) if (!hit[k]) return 0;
-    return 1;
+    if (next < 4) {
+        const float in = round & 1 ? 0.93f : 0.97f;
+        if (covers(f, px[next] * in, py[next] * in)) missDs[next] = 0;
+        else if (missDs[next] < 2) missDs[next]++;
+    }
+    if (++next == 8) { next = 0; round++; }
+    for (int k = 0; k < 4; k++) if (missDs[k] >= 2) return 0;
+    for (int k = 0; k < 8; k++) if (!hit[k]) return 1;
+    return 2;
 }
 static int wide_stable(int want) {
+    // (on: 4 frames fully covered; off: 4 frames not a map scene, or 90 (3 s) with a widened corner empty)
     static int state, count;
-    if (want == state) { count = 0; return state; }
-    if (sWideNow || ++count >= 4) { state = want; count = 0; }
+    const int on = state ? want != 0 : want == 2;
+    const int needed = state && want == 1 ? 90 : 4;
+    if (state && want == 1) { if (++count < needed) return state; }
+    else if (on == state) { count = 0; return state; }
+    else if (!sWideNow && ++count < needed) return state;
+    state = state && want == 1 ? 0 : on;
+    count = 0;
+    extern volatile uint32_t port_frame_count;
+    port_log("wide %s at frame %lu\n", state ? "on" : "off", (unsigned long)port_frame_count);
     return state;
 }
 
@@ -1997,7 +2200,7 @@ static void stereo_convergence(const G3Frame *f) {
 // are. The second pass draws over itself; the first survives where nothing else of the scene
 // was nearer: the cracks. Not for orthographic scenes (battles: flat sprites, no seams, where it
 // would only widen edges). The menu's "3D seams" row turns it off (settings.txt "seams off").
-int port_seam_fill = 1;
+int port_seam_fill = 0;
 // The copy is also pushed back a little (depth, in clip units per w): the surface drawn as it is
 // then wins over its own copy, while what lies farther behind (water under a bridge, through a
 // crack between its pieces) loses to it: no depth reset, cracks filled over geometry too. (Edges
@@ -2060,6 +2263,13 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
     }
     draw_polys(f, 0, disp3d);
+    const int holes = port_hole_fill && !sFlatScene;
+    if (holes) {
+        hole_fill(eye > 0 ? &s3dTexR : &s3dTex, 0);
+        C3D_BindProgram(&sProg3d);
+        attrs_3d(f);
+        C3D_SetViewport(vpx, vpy, vpw, vph);
+    }
     if ((disp3d & 0x20) && idt && port_edge_mode) {
         // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
         // edges from the opaque pixels' IDs; translucent polygons blend over the result.)
@@ -2081,6 +2291,12 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
         }
         draw_ids(f, disp3d, 0);
+        if (holes) {
+            hole_fill(sIdCur, 1);
+            C3D_BindProgram(&sProgId);
+            attrs_3d(f);
+            C3D_SetViewport(vpx, vpy, vpw, vph);
+        }
         // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
         draw_ids(f, disp3d, 1);

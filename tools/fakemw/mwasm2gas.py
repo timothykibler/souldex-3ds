@@ -4,6 +4,7 @@ import re
 
 _SECTIONS = {".rodata": ".section .rodata", ".bss": ".section .bss", ".sbss": ".section .sbss",
              ".ctor": ".section .ctor,\"aw\"", ".init": ".section .init,\"ax\""}
+_POOL_WORD = re.compile(r"^\s*\w+:\s*\.word\b")
 _DATA_WORD = re.compile(r"^(\s*)\.(word|short)\b")
 _DATA_LIST = re.compile(r"^\s*\.(byte|short|word|2byte|4byte|hword)\b")
 _INCLUDE = re.compile(r'^\s*\.include\s+"([^"]+)"')
@@ -113,6 +114,8 @@ def convert(text, move_ds_addresses=False, phase=None):
         # written. .4byte / .2byte are the same values, never padded: the DS layout, byte for byte.
         if not in_code:
             line = _DATA_WORD.sub(lambda d: d.group(1) + (".4byte" if d.group(2) == "word" else ".2byte"), line)
+        elif _POOL_WORD.match(line):  # (a literal pool entry: word-aligned, as ldr needs, after a rewrite made code longer)
+            line = "\t.balign 4\n" + line
         lines.append(line)
     if move_ds_addresses:
         _move_io_base_immediates(lines)

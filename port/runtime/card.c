@@ -35,7 +35,7 @@ bool port_rom_open(void) {
                 sRom = NULL;
                 continue;
             }
-            setvbuf(sRom, NULL, _IOFBF, 64 * 1024);
+            setvbuf(sRom, NULL, _IONBF, 0);  // (reads go straight to the SD card: the block cache below)
             return true;
         }
     }
@@ -44,12 +44,63 @@ bool port_rom_open(void) {
 
 uint32_t port_rom_size(void) { return sRomSize; }
 
+// ROM reads through a cache of 32 KB blocks (2 MB, least recently used out). The game reads
+// archives in small pieces (a header, a few 8-byte table entries, then the member), each at its
+// own offset; through stdio's buffer every seek threw the buffer away and refilled all 64 KB
+// from the SD card: tens of milliseconds for a few hundred bytes, an update's whole budget
+// (the slowdowns in battle as move animations load). Large reads go straight through.
+#define RB_SHIFT 15
+#define RB_SIZE (1u << RB_SHIFT)
+#define RB_COUNT 64
+static u8 *sRb;
+static u32 sRbTag[RB_COUNT], sRbUse[RB_COUNT], sRbClock;
+uint64_t gRomTicks;   // (time in ROM reads: the log, the frame counter's SD line)
+uint32_t gRomReads;   // (reads from the SD card)
+static void rom_fetch(uint32_t offset, void *dst, uint32_t len) {
+    gRomReads++;
+    if (fseek(sRom, offset, SEEK_SET) != 0 || fread(dst, 1, len, sRom) != len)
+        port_fatal("ROM read failed: %lu bytes at %08lX", len, offset);
+}
 void port_rom_read(uint32_t offset, void *dst, uint32_t len) {
     void port_vblank_irq_maybe(void);
     port_vblank_irq_maybe();
-    if (fseek(sRom, offset, SEEK_SET) != 0 || fread(dst, 1, len, sRom) != len) {
-        port_fatal("ROM read failed: %lu bytes at %08lX", len, offset);
+    uint64_t t0 = port_ctr_ticks();
+    if (!sRb) {
+        static int tried;
+        if (!tried) {
+            tried = 1;
+            sRb = malloc(RB_SIZE * RB_COUNT);
+            for (int i = 0; i < RB_COUNT; i++) sRbTag[i] = ~0u;
+            port_log(sRb ? "ROM: 2 MB read cache\n" : "ROM: no memory for the read cache\n");
+        }
     }
+    if (!sRb || len > 2 * RB_SIZE) {
+        rom_fetch(offset, dst, len);
+    } else {
+        u8 *out = dst;
+        while (len) {
+            u32 blk = offset >> RB_SHIFT, in = offset & (RB_SIZE - 1), n = RB_SIZE - in;
+            if (n > len) n = len;
+            int hit = -1, lru = 0;
+            for (int i = 0; i < RB_COUNT; i++) {
+                if (sRbTag[i] == blk) { hit = i; break; }
+                if (sRbUse[i] < sRbUse[lru]) lru = i;
+            }
+            if (hit < 0) {
+                hit = lru;
+                u32 start = blk << RB_SHIFT, size = RB_SIZE;
+                if (start >= sRomSize) port_fatal("ROM read past the end: %08lX", offset);
+                if (start + size > sRomSize) size = sRomSize - start;
+                sRbTag[hit] = ~0u;
+                rom_fetch(start, sRb + (size_t)hit * RB_SIZE, size);
+                sRbTag[hit] = blk;
+            }
+            sRbUse[hit] = ++sRbClock;
+            memcpy(out, sRb + (size_t)hit * RB_SIZE + in, n);
+            out += n; offset += n; len -= n;
+        }
+    }
+    gRomTicks += port_ctr_ticks() - t0;
 }
 
 // ---------------------------------------------------------------- ROM

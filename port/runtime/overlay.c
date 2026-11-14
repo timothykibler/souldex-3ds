@@ -51,6 +51,14 @@ void *port_overlay_dispatch(u32 idx) {
         }
         return d->c[k].fn;
     }
+    // (the overlay loaded there may have only a local function at that address, not in the
+    // table: the one linked, as before; said once)
+    static u8 told[512];
+    for (u32 ov = 0; ov < MAX_OV; ov++)
+        if (sLoaded[ov] && sStart[ov] <= d->ds && d->ds < sEnd[ov] && idx < sizeof(told) && !told[idx]) {
+            told[idx] = 1;
+            port_log("ovdispatch: %s while overlay %lu is loaded there, no function of its known: the linked one\n", d->name, (unsigned long)ov);
+        }
     return d->dflt;
 }
 

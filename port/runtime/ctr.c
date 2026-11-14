@@ -5,14 +5,51 @@
 #include <string.h>
 #include "port.h"
 
+// The game's frames paced to the screen's own refresh (59.83 Hz, the DS's too), as the DS's are to
+// its VBlank. (By the system timer at 60.00 Hz before: the pictures swap on the real refresh, so
+// the two drifted apart and frames were lost, 57 a second on a New 3DS.) A thread waits for each
+// top-screen VBlank and counts it; a frame waits for the count to pass the last frame's, catching up
+// at most one late frame (a frame that ran late costs only its overrun, no hurrying after a long
+// one). If the VBlank event stops coming (on a 3DS XL it did, once, during a battle's start), the
+// wait times out after 20 ms and the frame goes on by the timer.
+static LightEvent sVbEvent;
+static volatile u32 sVbCount;
+static Thread sVbThread;
+uint32_t gFramesLate, gFramesTimedOut;  // (the log's: frames that found their VBlank passed, and waits that timed out)
+static void vblank_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        gspWaitForEvent(GSPGPU_EVENT_VBlank0, true);
+        sVbCount++;
+        LightEvent_Signal(&sVbEvent);
+    }
+}
 bool port_ctr_frame_wait(void) {
-    // The game's frames paced to 60 a second, as the DS's are to its VBlank: by the system timer,
-    // sleeping until the next frame's time (a frame that ran late costs only its overrun; one more
-    // than a frame late starts the count afresh, no catching up). Not by the GSP's VBlank event:
-    // on a 3DS (XL) it stopped coming during a battle's start, and the game waited forever.
-    // (The picture still swaps on the real VBlank: citro3d.)
-    static u64 next;
-    const u64 period = SYSCLOCK_ARM11 / 60;  // (268111856 / 60 ticks)
+    static u32 target;
+    static u64 next;  // (the timer's deadline, when the VBlank thread isn't there)
+    const u64 period = SYSCLOCK_ARM11 / 60;
+    if (!sVbThread) {
+        static int tried;
+        if (!tried) {
+            tried = 1;
+            LightEvent_Init(&sVbEvent, RESET_ONESHOT);
+            sVbThread = threadCreate(vblank_main, NULL, 4096, 0x18, 0, true);  // (the game's core, above it: it only waits, and wakes at once)
+            extern void port_log(const char *fmt, ...);
+            port_log(sVbThread ? "frames: paced by the screen's VBlank\n" : "frames: paced by the timer\n");
+            target = sVbCount;
+        }
+    }
+    if (sVbThread) {
+        target++;
+        u32 c = sVbCount;
+        if ((s32)(c - target) > 0) { gFramesLate++; target = c; }  // (late by a frame or more: no catching up)
+        else if ((s32)(c - target) < 0) {
+            while ((s32)(sVbCount - target) < 0) {
+                if (LightEvent_WaitTimeout(&sVbEvent, 20000000LL)) { gFramesTimedOut++; break; }
+            }
+        }
+        return aptMainLoop();
+    }
     u64 now = svcGetSystemTick();
     if (next && now < next) svcSleepThread((s64)((next - now) * 1000000000ULL / SYSCLOCK_ARM11));
     now = svcGetSystemTick();

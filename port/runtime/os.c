@@ -62,12 +62,51 @@ void port_vblank_irq_maybe(void) {
 }
 
 static u64 sGameTicks, sFrameEnter, sFrameExit;
+volatile unsigned port_hud_fps;
+unsigned port_cpu_mhz;  // (measured at the start, main.c)
+volatile float port_hud_cpu_ms, port_hud_wait_ms, port_hud_sd_ms;
+static u64 sHudWait;  // (in the render core wait, since the last second)
+
+// One picture per game update. The game's main loop (src/main.c) updates once per two VBlanks:
+// it waits for one after the update (unless that ran long) and another after requesting the 3D
+// swap; the DS shows each picture twice. Drawing at both waits drew everything twice. So the first
+// wait is a VBlank without a picture (its interrupt work, the pacing): a picture at the wait after
+// the swap request (Handle3DBufferSwapRequest, wrapped), or at any wait after one without (never
+// two in a row without: waits outside the main loop still get 30 pictures a second).
+// Double speed (the settings menu): the first wait skipped, as the ROM's frame-unlock cheat does:
+// an update every VBlank, everything at up to twice the speed.
+int port_double_speed;
+static int sSwapRequested, sLastPresented = 1;
+void __real_Handle3DBufferSwapRequest(void);
+void __wrap_Handle3DBufferSwapRequest(void) { sSwapRequested = 1; __real_Handle3DBufferSwapRequest(); }
+
 void port_frame(void) {
+    const int present = sSwapRequested || !sLastPresented;
+    sSwapRequested = 0;
+    sLastPresented = present;
+    if (!present && port_double_speed && !sInIrq) {  // (no VBlank at all here: the cheat's way)
+        INTR_CHECK |= OS_IE_V_BLANK;
+        return;
+    }
     sFrameEnter = port_ctr_ticks();
-    if (sFrameExit) sGameTicks += sFrameEnter - sFrameExit;  // (the game's own code since the last frame)
+    u64 game = sFrameExit ? sFrameEnter - sFrameExit : 0;  // (the game's own code since the last frame)
+    sGameTicks += game;
+    {  // (the frame counter's: frames and game code per second, gpu2d.c draws them)
+        static u64 t, g;
+        static unsigned n;
+        g += game; n += present;
+        if (sFrameEnter - t >= 268111856ull) {
+            if (t) { port_hud_fps = (unsigned)((n * 268111856ull + (sFrameEnter - t) / 2) / (sFrameEnter - t)); port_hud_cpu_ms = n ? g / 268111.856f / n : 0; port_hud_wait_ms = n ? sHudWait / 268111.856f / n : 0; }
+            { extern uint32_t gFramesLate, gFramesTimedOut; static uint32_t ll, lt;
+          port_log("  frames late %lu, VBlank waits timed out %lu\n", (unsigned long)(gFramesLate - ll), (unsigned long)(gFramesTimedOut - lt)); ll = gFramesLate; lt = gFramesTimedOut; }
+        { extern uint64_t gRomTicks; static uint64_t last; port_hud_sd_ms = n ? (gRomTicks - last) / 268111.856f / n : 0; last = gRomTicks; }
+            sHudWait = 0;
+            t = sFrameEnter; g = 0; n = 0;
+        }
+    }
     extern volatile const char *port_stage;
     port_stage = "frame: waiting for the render core";
-    port_render_wait();  // (the last frame's picture built: video memory may change again from here)
+    { u64 w0 = port_ctr_ticks(); port_render_wait(); sHudWait += port_ctr_ticks() - w0; }  // (the last frame's picture built: video memory may change again from here)
     port_stage = "frame: waiting for the VBlank";
     if (!port_ctr_frame_wait()) port_ctr_exit(0);
     port_frame_count++;
@@ -107,6 +146,8 @@ void port_frame(void) {
         port_g3_hist_report();
         port_log("  game code %lu us, waiting for the GPU / frame limit %lu us per frame\n", (unsigned long)(sGameTicks / 600 / 268), (unsigned long)(gGpu2dWaitTicks / 600 / 268));
         sGameTicks = gGpu2dWaitTicks = 0;
+        { extern uint64_t gRomTicks; extern uint32_t gRomReads; static uint64_t lt; static uint32_t lr;
+          port_log("  ROM: %lu SD reads, %lu us per frame\n", (unsigned long)(gRomReads - lr), (unsigned long)((gRomTicks - lt) / 600 / 268)); lt = gRomTicks; lr = gRomReads; }
         extern void port_snd_report(void);
         port_snd_report();
     }
@@ -133,9 +174,11 @@ void port_frame(void) {
     port_g3_vblank();
     extern void port_gpu2d_frame(void);
     extern void port_gpu2d_readback(u16 *top, u16 *bottom);
-    u64 t0 = port_ctr_ticks();
-    port_render_start(port_gpu2d_frame);  // (on the render core while the game goes on; see ctr.c)
-    renderTicks += port_ctr_ticks() - t0;
+    if (present) {
+        u64 t0 = port_ctr_ticks();
+        port_render_start(port_gpu2d_frame);  // (on the render core while the game goes on; see ctr.c)
+        renderTicks += port_ctr_ticks() - t0;
+    }
     port_stage = "game code";
     if (port_dump_every && port_frame_count % port_dump_every == 0) {
         static u16 top[256 * 192], bottom[256 * 192];
