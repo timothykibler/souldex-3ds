@@ -1089,7 +1089,7 @@ void port_gpu2d_frame(void) {
     // (before the frame: citro3d makes and deletes render targets only outside one)
     stereo_decide(((rd16(DS(0x04000304)) >> 15) & 1) && (rd32(DS(0x04000000)) & 0x108) == 0x108);  // (engine A's 3D layer shown, on the top screen)
     u64 tw = svcGetSystemTick();
-    C3D_FrameBegin(C3D_FRAME_SYNCDRAW);
+    C3D_FrameBegin(0);  // (the GPU's previous frame finished; the pacing to the VBlank is the game thread's: port_ctr_frame_wait)
     u64 t0 = svcGetSystemTick();
     gGpu2dWaitTicks += t0 - tw;
     sVtxUsed = 0;

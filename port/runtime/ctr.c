@@ -6,7 +6,10 @@
 #include "port.h"
 
 bool port_ctr_frame_wait(void) {
-    // (the GPU compositor's C3D_FrameBegin(SYNCDRAW) already paces the frames to the VBlank)
+    // The game's frames paced to the 3DS's VBlank, as the DS's are to its own: wait for one unless
+    // one has already come since the last frame (a frame that ran late then costs only its
+    // overrun, not a whole extra VBlank). (Not in the render thread: it builds while the game runs.)
+    gspWaitForEvent(GSPGPU_EVENT_VBlank0, false);
     return aptMainLoop();
 }
 
@@ -120,4 +123,60 @@ int port_ctr_thread_start(void (*fn)(void *), int stack) {
 
 void port_ctr_wait_signal(volatile int *flag, int value) {
     while (*flag != value) svcSleepThread(100000);
+}
+
+// ---------------------------------------------------------------- the render core
+// The frame's picture (port_gpu2d_frame: BG planes, sprites, the 3D layer, the GPU's command
+// lists) is built on another core while the game runs its next frame: a frame then costs the
+// longer of the two, not their sum (field: ~9.5 ms of game, ~8.5 ms of frame building). It starts
+// right after the VBlank handler's transfers (the state the DS would scan out) and must finish
+// before anything changes video memory again: the next frame's VBlank handler, a VBlank during
+// loading, a debug dump, the cheat menu. port_render_wait() is called before each. On the New
+// 3DS: core 2, below the sound thread's priority; elsewhere (no spare core) inline, as before.
+// debug.txt "render inline" turns it off.
+int port_render_inline;
+static Thread sRenderThread;
+static LightEvent sRenderGo, sRenderDone;
+static void (*volatile sRenderFn)(void);
+static volatile int sRenderBusy;
+uint64_t gRenderWaitTicks;  // (the game waiting for the render core: frame building is the limit)
+
+static void render_main(void *arg) {
+    (void)arg;
+    for (;;) {
+        LightEvent_Wait(&sRenderGo);
+        void (*fn)(void) = sRenderFn;
+        if (!fn) break;
+        fn();
+        sRenderBusy = 0;
+        LightEvent_Signal(&sRenderDone);
+    }
+}
+
+static int render_thread_up(void) {
+    static int tried;
+    if (sRenderThread || tried) return sRenderThread != NULL;
+    tried = 1;
+    LightEvent_Init(&sRenderGo, RESET_ONESHOT);
+    LightEvent_Init(&sRenderDone, RESET_ONESHOT);
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    sRenderThread = threadCreate(render_main, NULL, 128 * 1024, prio + 1, 2, false);
+    extern void port_log(const char *fmt, ...);
+    port_log(sRenderThread ? "render: on core 2\n" : "render: inline (no core 2)\n");
+    return sRenderThread != NULL;
+}
+
+void port_render_start(void (*fn)(void)) {
+    if (port_render_inline || !render_thread_up()) { fn(); return; }
+    sRenderFn = fn;
+    sRenderBusy = 1;
+    LightEvent_Signal(&sRenderGo);
+}
+
+void port_render_wait(void) {
+    if (!sRenderBusy) return;
+    uint64_t t = svcGetSystemTick();
+    while (sRenderBusy) LightEvent_Wait(&sRenderDone);
+    gRenderWaitTicks += svcGetSystemTick() - t;
 }

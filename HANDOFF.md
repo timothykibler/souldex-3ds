@@ -21,7 +21,12 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
 ## Open items, in order
 
 1. **Hardware test** of the CIA (speed, and the cache flushes: the GPU path has only run in Azahar).
-2. **Speed (shelved 2026-11-14; 60 fps in the overworld looks out of reach as things stand)**.
+2. **Speed**: since 2026-11-14 the frame is built on a render core (ctr.c "the render core": New
+   3DS core 2, inline elsewhere) while the game runs its next frame, and the game thread paces
+   itself to the VBlank (gspWaitForEvent) instead of citro3d's SYNCDRAW: field 39 -> 59 fps in
+   Azahar, pixel-identical (`debug.txt` `render inline` to compare; the log's "waiting for the
+   render core" is how much frame building is still the limit). Not yet measured on hardware.
+   Earlier notes (before the render core), kept for the next step:
    Plan when picked up: a **30 / 60 fps mode** setting. 30 fps (the default) keeps everything
    (seam fill, edge marking, stereo); 60 fps turns off what costs per frame (seam fill, stereo,
    possibly edge marking) and accepts its artifacts.

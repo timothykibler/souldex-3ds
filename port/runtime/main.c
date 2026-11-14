@@ -98,6 +98,7 @@ int main(void) {
             }
             else if (sscanf(line, "menu %u", &n) == 1) { void port_cheats_script(uint32_t f, const char *k); const char *k = strchr(line + 5, ' '); if (k) port_cheats_script(n, k + 1); }
             else if (sscanf(line, "g3prof %u", &n) == 1) { extern int port_g3_prof; port_g3_prof = (int)n; }
+            else if (!strncmp(line, "render inline", 13)) { extern int port_render_inline; port_render_inline = 1; }
             else if (!strncmp(line, "stereo ", 7)) { extern float port_stereo_force; float v; if (sscanf(line + 7, "%f", &v) == 1) port_stereo_force = v; }
             else if (sscanf(line, "strmtest %u", &n) == 1) { extern int port_strmtest_frame_no; port_strmtest_frame_no = (int)n; }
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }

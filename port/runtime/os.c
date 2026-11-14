@@ -46,10 +46,13 @@ void port_input_update(void);
 // than its queue holds: they drain as it goes). Called at points where the game waits on the
 // card; runs the game's VBlank handler if a frame's time has passed and interrupts are enabled.
 static u64 sLastVblank;
+void port_render_start(void (*fn)(void));
+void port_render_wait(void);
 void port_vblank_irq_maybe(void) {
     if (sInIrq || sIntrMode == OS_INTRMODE_IRQ_DISABLE || !sLastVblank) return;
     u64 now = port_ctr_ticks();
     if (now - sLastVblank < 268111856ull / 60) return;
+    port_render_wait();  // (the VBlank handler changes video memory: the render core done with it first)
     sLastVblank = now;
     OSIrqFunction vblank = OS_IRQTable[REG_OS_IE_VB_SHIFT];
     if (vblank) { sInIrq = 1; vblank(); sInIrq = 0; }
@@ -62,6 +65,7 @@ static u64 sGameTicks, sFrameEnter, sFrameExit;
 void port_frame(void) {
     sFrameEnter = port_ctr_ticks();
     if (sFrameExit) sGameTicks += sFrameEnter - sFrameExit;  // (the game's own code since the last frame)
+    port_render_wait();  // (the last frame's picture built: video memory may change again from here)
     if (!port_ctr_frame_wait()) port_ctr_exit(0);
     port_frame_count++;
     if (port_frame_count % 600 == 0) {
@@ -90,6 +94,9 @@ void port_frame(void) {
         extern u64 gG3Ticks;
         port_log("  geometry engine %lu us per frame (part of the game code)\n", (unsigned long)(gG3Ticks / 600 / 268));
         gG3Ticks = 0;
+        extern uint64_t gRenderWaitTicks;
+        port_log("  waiting for the render core %lu us per frame\n", (unsigned long)(gRenderWaitTicks / 600 / 268));
+        gRenderWaitTicks = 0;
         extern void port_g3_hist_report(void);
         port_g3_hist_report();
         port_log("  game code %lu us, waiting for the GPU / frame limit %lu us per frame\n", (unsigned long)(sGameTicks / 600 / 268), (unsigned long)(gGpu2dWaitTicks / 600 / 268));
@@ -120,10 +127,11 @@ void port_frame(void) {
     extern void port_gpu2d_frame(void);
     extern void port_gpu2d_readback(u16 *top, u16 *bottom);
     u64 t0 = port_ctr_ticks();
-    port_gpu2d_frame();
+    port_render_start(port_gpu2d_frame);  // (on the render core while the game goes on; see ctr.c)
     renderTicks += port_ctr_ticks() - t0;
     if (port_dump_every && port_frame_count % port_dump_every == 0) {
         static u16 top[256 * 192], bottom[256 * 192];
+        port_render_wait();
         void port_dump_screens(const u16 *, const u16 *, u32);
         port_gpu2d_readback(top, bottom);
         port_dump_screens(top, bottom, port_frame_count);
