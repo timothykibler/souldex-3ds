@@ -107,8 +107,11 @@ Classes found and fixed so far:
 ## Workflow that works
 
 - **Build** (in Docker, image `ss3ds-dev`, Docker Desktop must be running):
-  `docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--skip-game]`
+  `docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--skip-game] [--release]`
   (`--skip-game` relinks the runtime only; a full build recompiles the game and SDK, ~5 min).
+  Debug is the default (`PORT_DEBUG=1`, `port/runtime/port.h`); `--release` turns off `debug.txt`,
+  the Wi-Fi log and the default-on frame counter. Only the runtime differs, so switching variants
+  with `--skip-game` is safe. `tools/azrun.sh` needs a debug build (it drives the game through debug.txt).
   Then `find -L build-3ds -name "* [0-9].*" -delete` (iCloud conflict copies, see below).
 - **CIA**: `port/package.sh` (builds the `ss3ds-cia` image from `docker/cia/Dockerfile` the first
   time: devkitARM + makerom + bannertool, the latter compiled from source).

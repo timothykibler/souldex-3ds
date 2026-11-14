@@ -1074,7 +1074,7 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
 // Top-left of the top screen (in the black border at 1:1): the game's frames per second, the
 // GPU's drawing time per frame, the game code's (CPU core 1) and the render core's (2D and 3D
 // layer building, core 2), in ms, averaged over each second. Settings menu: "Frame counter".
-int port_hud_on = 1;
+int port_hud_on = PORT_DEBUG;  // (on in a debug build; settings.txt "hud" overrides either)
 extern volatile unsigned port_hud_fps;
 extern volatile float port_hud_cpu_ms, port_hud_wait_ms, port_hud_sd_ms;
 static float sHudGpuAcc, sHudRenAcc, sHudGpuMs, sHudRenMs;

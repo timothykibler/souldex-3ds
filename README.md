@@ -55,8 +55,13 @@ Needs Docker. One-time setup:
 
 Then:
 
-    docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py
+    docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--release]
     port/package.sh        # build-3ds/soulsilver.cia (builds the ss3ds-cia image from docker/cia the first time: makerom, bannertool)
+
+A debug build is the default. `--release` makes the build to play or share: it ignores `debug.txt`,
+sends no Wi-Fi log and starts with the frame counter off (it stays in the settings menu). Both keep
+the log file, the freeze watchdog and crash reporting. The build ID (first log line) ends in
+`-debug` or `-release`.
 
 ## Run
 

@@ -109,7 +109,7 @@ int main(void) {
         APT_CheckNew3DS(&n3ds);
         port_log("cpu: about %u MHz (New 3DS: %s)\n", port_cpu_mhz, n3ds ? "yes" : "no");
     }
-    port_log("SoulSilver 3DS, build %s\n", PORT_BUILD_ID);  // (build-3ds/elves/<this>.elf is its program: for crash dumps)
+    port_log("SoulSilver 3DS, build %s (%s)\n", PORT_BUILD_ID, PORT_DEBUG ? "debug" : "release");  // (build-3ds/elves/<this>.elf is its program: for crash dumps)
     extern bool port_gpu2d_init(void);
     if (!port_gpu2d_init()) { consoleInit(GFX_BOTTOM, NULL); port_fatal("could not start the GPU"); }
     port_log_screen = 0;  // (the console would draw over the GPU's bottom screen, in the wrong format: static)
@@ -120,7 +120,8 @@ int main(void) {
     setup_system_area();
     port_overlays_init();
     // debug.txt on the SD card: "dump N" saves both screens every N frames (shot_*.bmp)
-    FILE *dbg = fopen(PORT_DIR "/debug.txt", "r");
+    // (release build: ignored, so a leftover debug.txt can't script input, warp or dump)
+    FILE *dbg = PORT_DEBUG ? fopen(PORT_DIR "/debug.txt", "r") : NULL;
     if (dbg) {
         extern uint32_t port_dump_every;
         char line[64];

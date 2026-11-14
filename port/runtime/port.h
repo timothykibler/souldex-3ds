@@ -6,6 +6,12 @@
 #include <stdint.h>
 #include <stdio.h>
 
+// Debug build (the default) or release (port/build.py --release, PORT_DEBUG=0): a release build
+// ignores debug.txt, sends no Wi-Fi log (netlog.txt) and starts with the frame counter off.
+#ifndef PORT_DEBUG
+#define PORT_DEBUG 1
+#endif
+
 void port_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 __attribute__((noreturn)) void port_fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

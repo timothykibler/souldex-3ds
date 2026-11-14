@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Builds the SoulSilver 3DS port (phase 0) from pokeheartgold. Runs in the ss3ds-dev image:
 
-    docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--skip-game]
+    docker run --rm -v "$PWD":/w -w /w ss3ds-dev python3 port/build.py [--skip-game] [--release]
+
+Debug (the default) or --release: only the port's runtime differs (PORT_DEBUG=1/0, port/runtime/port.h),
+so switching with --skip-game is safe. A release build ignores debug.txt, sends no Wi-Fi log and starts
+with the frame counter off; the log file, the watchdog and crash reporting are in both.
 
 Needs build-gen (the decomp's generated headers: see README). Output: build-3ds/soulsilver.3dsx
 """
@@ -17,6 +21,9 @@ DKA = "/opt/devkitpro/devkitARM/bin/arm-none-eabi-"
 CC = DKA + "gcc"
 sys.path.insert(0, f"{ROOT}/port")
 import compile_game as cg  # noqa: E402
+
+RELEASE = "--release" in sys.argv
+VARIANT = "release" if RELEASE else "debug"
 
 TARGETS = [("main.nef", "c"), ("main.nef", "s"),
            ("subprojects/NitroSDK-4.2.30001/libraries", "c"),
@@ -119,7 +126,7 @@ def compile_runtime():
     head = open(f"{ROOT}/.git/HEAD").read().strip()
     sha = open(f"{ROOT}/.git/" + head[5:]).read().strip() if head.startswith("ref: ") and os.path.exists(f"{ROOT}/.git/" + head[5:]) else head
     import time
-    build_id = f"{sha[:7]}-{time.strftime('%Y%m%d-%H%M%S')}"
+    build_id = f"{sha[:7]}-{time.strftime('%Y%m%d-%H%M%S')}-{VARIANT}"
     os.makedirs(f"{B}/gen", exist_ok=True)
     open(f"{B}/gen/build_id.txt", "w").write(build_id + "\n")
     objs = []
@@ -129,7 +136,7 @@ def compile_runtime():
             cmd = [CC, "-c", "-march=armv6k", "-mfloat-abi=hard", s, "-o", o]
         else:
             uses_ctru = "<3ds.h>" in open(s).read()
-            cmd = [CC, "-c"] + cg.CFLAGS + ["-w", f"-I{ROOT}/port/runtime"]
+            cmd = [CC, "-c"] + cg.CFLAGS + ["-w", f"-I{ROOT}/port/runtime", f"-DPORT_DEBUG={0 if RELEASE else 1}"]
             cmd += (["-I/opt/devkitpro/libctru/include", "-D__3DS__", f"-I{ROOT}/port/include"] if uses_ctru else flags)
             if s.endswith("main.c"):
                 cmd += [f'-DPORT_BUILD_ID="{build_id}"']
@@ -188,6 +195,7 @@ def make_stubs(undefined):
 
 
 def main():
+    print(f"build: {VARIANT}")
     if "--skip-game" not in sys.argv:
         run(["python3", f"{ROOT}/port/sdkfix.py"])
         for target, kind in TARGETS:

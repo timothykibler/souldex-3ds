@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include "port.h"
 
 #define PORT_DIR "sdmc:/3ds/soulsilver-3ds"
 #define DUMPS "sdmc:/luma/dumps/arm11"
@@ -88,6 +89,10 @@ static void send_new_dump(void) {
 }
 
 void port_netlog_init(const char *build) {
+#if !PORT_DEBUG
+    (void)build;
+    return;  // (release build: no Wi-Fi log)
+#endif
     FILE *f = fopen(PORT_DIR "/netlog.txt", "r");
     if (!f) return;
     char line[64] = "";
