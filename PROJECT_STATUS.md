@@ -126,7 +126,7 @@ takes over the SDK or library call that would have driven it.
   setup). Upload each model's vertices to the GPU once. Pass the matrices as vertex-shader
   uniforms, and let the PICA do the transform and lighting the way 3DS games do.
 - **Smaller intermediate steps:**
-  1. Finish the core-2 geometry worker (see 5.1).
+  1. Finish the core-2 geometry worker (T1 in section 5).
   2. Cache display lists whose contents and state repeat. pspoke, a PSP port of the same game,
      cut outdoor 3D from 19 to 5 ms this way.
   3. Transform on the PICA while keeping the command stream as input.
@@ -180,39 +180,199 @@ takes over the SDK or library call that would have driven it.
 
 ---
 
-## 5. Next tasks
+## 5. Task backlog
 
-In priority order.
+A menu of tasks to pick from. Each one has an ID to name when picking it up ("let's do T3a").
 
-1. **Finish the New 3DS geometry worker (uncommitted).** Run `gx3d.c` on core 2 so the overworld
-   reaches 60 fps at "Speed: double".
-   - **Status:** it renders the map correctly with the same command stream, but the NPC and
-     player billboard sprites (the frame's last polygons, attr `001F8081`) get w ≤ 0 for every
-     vertex.
-   - **Next step:** log the position matrix, projection, matrix mode and position stack pointer
-     at the first sprite's BEGIN with `g3thread 0` and `g3thread 1`, and diff them.
-   - **Constraints:** it must stay New 3DS-only (`APT_CheckNew3DS`) and run inline on the
-     original 3DS XL. It is defaulted off (`port_g3_thread = 0`) until the sprites are fixed.
-2. **Measure on hardware after the pacing changes.** The last log saved off the SD card (build
-   `d4ac67e`, New 3DS) read about 57 fps with ~4 ms of 2D frame building. Measure overworld and
-   battles at normal and double speed on both a New 3DS and the original 3DS XL. The SD card is
-   no longer connected, so read the frame counter or use the Wi-Fi net log.
-3. **Start the native 3D path (4.1).** Begin with display-list caching, since it is cheap and
-   proven by pspoke. Then prototype G3D-level drawing for one model type (the map) behind a
-   `debug.txt` switch, compared pixel-for-pixel against the current path.
-4. **Missing 3D features:** anti-aliasing (the field sets DISP3DCNT bit 4), shadow polygons,
-   fog, toon and highlight shading, translucent Y-sorting, rear-plane, display capture, and
-   per-polygon-ID edge colours.
-5. **Route direct 3D register writes from assembly** (overlay 41, and `sub_02015E64` and
-   `sub_020161CC`) through the command path.
-6. **OS gaps:** threads (`OS_CreateThread`, overlays 13 and 112) and soft reset, both fatal
-   today.
-7. **2D gaps:** H-blank (raster) effects, mosaic, bitmap sprites, VRAM bank remapping, and the
-   overlay 7 WINOUT address bit leftover.
-8. **Smaller:** the RTC uses UTC instead of local time, there is no microphone, there is no
-   `.3dsx` build, and cheat codes in unmapped regions are skipped.
-9. **Docs:** fold the still-valid parts of HANDOFF.md's "Open items" into this file and mark the
-   rest as history.
+### How to read the estimates
+
+Estimates are **Claude working time**: how long Claude spends actively on the task (reading,
+building, running Azahar tests, fixing), not your time. They come from this project's own
+history so far, for example:
+
+| Past work | Claude time (from commit times) |
+|---|---|
+| The whole sound system: ARM7 driver on its own core, mixer, NDSP, loudness fix | ~1 h |
+| Stereoscopic 3D, menu toggle included | ~20 min |
+| A hardware-only crash, found from a log and fixed | ~30 min each |
+| Cheats: usrcheat.dat, address translation, menu | ~2–3 h |
+| The render core and pacing to VBlank | ~30 min, plus ~8 h of follow-up pacing and speed work |
+| The geometry worker (T1) so far | ~45 min, unfinished |
+
+- **Hardware checks are extra, and they're your time.** Anything that changes speed or GPU
+  behaviour needs a run on a real 3DS, usually 15–30 minutes with the frame counter or the
+  Wi-Fi log. Waiting on those adds wall-clock time, not Claude time.
+- **One session** here means a few hours of continuous Claude work.
+- **Tasks marked ⚠ can overrun:** an earlier attempt failed, or the design isn't settled.
+- Sizes: **S** under 1 h, **M** 1–4 h, **L** 4–12 h (one or two sessions), **XL** more than
+  12 h (several sessions).
+
+### Summary
+
+| ID | Task | Size | Claude time | Depends on |
+|---|---|---|---|---|
+| **T1** | Fix the New 3DS geometry worker's sprite bug | S–M | 30–90 min | — |
+| **T2** | Measure speed on both 3DS models | S | ~15 min (plus your time at the 3DS) | T1 helps but isn't required |
+| **T3a** | 3D display-list caching | M | 2–4 h | — |
+| **T3b** | Native 3D prototype: the map drawn through the game's 3D library | L ⚠ | 4–8 h | — (T3a's findings help) |
+| **T3c** | Native 3D for everything: characters, battles, effects | XL ⚠ | 15–30 h | T3b |
+| **T4a** | Edge colours per polygon ID | S | 15–30 min | — |
+| **T4b** | Fog | M | 1–2 h | — |
+| **T4c** | Toon and highlight shading | S | 30–60 min | — |
+| **T4d** | Anti-aliasing | M | 1–2 h | — |
+| **T4e** | Translucent polygon sorting | M | 1–2 h | — |
+| **T4f** | Rear-plane (a bitmap behind the 3D) | S | 30–60 min | — |
+| **T4g** | Shadow polygons | M ⚠ | 2–4 h | — |
+| **T4h** | Display capture (3D into VRAM, used for effects) | M ⚠ | 2–4 h | — |
+| **T5** | Route the assembly's direct 3D writes through the command path | M | 1–2 h | — |
+| **T6a** | Threads (`OS_CreateThread`) | M | 2–4 h | — |
+| **T6b** | Soft reset | S–M | 30 min–2 h | — |
+| **T6c** | Real interrupts (VBlank as an event, not a call in `OS_WaitIrq`) | L ⚠ | 4–8 h | T6a |
+| **T7a** | Overlay 7's WINOUT address leftover | S | 15–45 min | — |
+| **T7b** | Mosaic | M | 1–2 h | — |
+| **T7c** | Bitmap sprites | S | 30–60 min | — |
+| **T7d** | H-blank (raster) effects | M | 2–4 h | — |
+| **T7e** | VRAM bank remapping | M ⚠ | 2–4 h | — |
+| **T8** | Native 2D: GPU updated from the SDK's 2D calls, not rebuilt from VRAM | XL ⚠ | 8–20 h | — |
+| **T9a** | Assembly → C, using the all-C fork as a reference (license check first) | XL ⚠ | 15–40 h | — |
+| **T9b** | Overlays as real code: no trampolines, no "reset on load" | L | 3–6 h | T9a |
+| **T9c** | Drop the Metrowerks ABI emulation | M | 2–4 h | T9a |
+| **T10** | Sound: one 3DS sound channel per DS channel | L | 4–8 h | — |
+| **T11** | Wireless over 3DS local wireless (UDS) | XL ⚠ | 40 h or more | T6a |
+| **T12a** | RTC in local time | S | ~10 min | — |
+| **T12b** | Microphone | M | 1–2 h | — |
+| **T12c** | `.3dsx` build | S | 30–60 min | — |
+| **T12d** | Cheat codes in unmapped regions | M | 1–2 h | — |
+| **T13** | Docs: fold HANDOFF.md's open items into this file | S | 15–30 min | — |
+
+**Quick wins (under an hour each):** T2, T4a, T4c, T4f, T7a, T7c, T12a, T12c, T13, and T1 if
+the state diff finds the bug quickly.
+
+### Native 3D: how the 3D tasks relate
+
+**T3 is the native 3D work.** Today the game's 3D library builds DS command lists, and the port
+interprets them on the CPU. The goal is to hook the library itself (`NNS_G3dDraw`, render
+objects, materials), upload each model's vertices once, and give the 3DS GPU the matrices as
+shader uniforms, the way 3DS games draw.
+
+The other 3D tasks relate to it like this:
+
+| Task | Relation to native 3D |
+|---|---|
+| **T1** geometry worker | **A stopgap.** Same emulated engine, moved to another core on a New 3DS. Gives speed now; mostly made unnecessary by T3c. |
+| **T2** measurement | **Decides priority.** If the New 3DS already holds 60 fps after T1, native 3D matters mostly for the original 3DS XL. If not, T3 moves up. |
+| **T3a** caching | **The first step of T3.** Cheap and proven: pspoke, a PSP port of the same game, cut outdoor 3D from 19 to 5 ms this way. Its lessons about which state repeats carry into T3b. |
+| **T4a–h** effects | **Needed either way.** They're drawing features, so whichever path feeds the GPU needs them. Fog and toon shading become shader work in T3. Shadow polygons stay stencil tricks in both paths. Doing them now isn't wasted. |
+| **T5** direct writes | **Why the old engine stays.** This assembly sends raw 3D commands past the 3D library, so T3 never sees it. Overlay 41 and two helper functions keep needing the emulated engine. |
+
+**A constraint for every 3D path.** The game reads some results back from the DS's 3D hardware,
+such as the clip matrix and position and box tests, and expects exact DS fixed-point answers. A
+native path still has to compute those on the CPU, even when the GPU does the drawing.
+
+### Task details
+
+**T1: Fix the New 3DS geometry worker (uncommitted)**
+- **Goal:** run `gx3d.c` on core 2 so the overworld reaches 60 fps at "Speed: double".
+- **Status:** the command stream is identical with the worker on, and the map renders correctly.
+  But the NPC and player billboard sprites (the frame's last polygons, attr `001F8081`) get
+  w ≤ 0 for every vertex, so they're invisible.
+- **Ruled out:** floating-point settings (FPSCR) and the sync points (the sync counters read 0).
+- **Next step:** log the position matrix, projection, matrix mode and position stack pointer at
+  the first sprite's BEGIN with `g3thread 0` and `g3thread 1`, and diff the two.
+- **Constraints:** must stay New 3DS-only (`APT_CheckNew3DS`) and run inline on the original
+  3DS XL. Off by default (`port_g3_thread = 0`) until the sprites are fixed.
+- **Note:** Azahar runs all cores in turn, so only hardware shows the speed gain.
+
+**T2: Measure on hardware (needs you at the 3DS)**
+- The last log saved off the SD card (build `d4ac67e`, New 3DS, before the pacing changes) read
+  about 57 fps, with ~4 ms of 2D frame building.
+- Measure overworld and battles at normal and double speed, on both a New 3DS and the original
+  3DS XL.
+- The SD card is no longer connected, so read the on-screen frame counter or use the Wi-Fi log.
+
+**T3a: Display-list caching**
+- When a display list's contents and the 3D state it starts from repeat, reuse last frame's
+  transformed triangles instead of running the geometry engine again.
+- **The hard part** is knowing exactly which state a list depends on: matrices, lights,
+  materials, and anything the game reads back.
+- Verify pixel-for-pixel against the current path with `debug.txt` dumps.
+
+**T3b: Native 3D prototype for the map ⚠**
+- Draw the map's models through the game's 3D library, behind a `debug.txt` switch, and compare
+  against the current path.
+- **Watch out for:** readbacks (see the constraint above), widescreen and stereo hooks, seam
+  fill and edge marking, all of which currently depend on screen-space triangles.
+
+**T3c: Native 3D for everything ⚠**
+- Characters and billboards, battle Pokémon and backgrounds, effects, animated textures and
+  materials.
+- Keep the emulated engine as the fallback for T5's assembly and for anything not yet moved.
+
+**T4a–h: Missing 3D effects**
+- **T4a, edge colours:** today one edge colour is used for all polygon IDs. HGSS sets all eight
+  alike, so the visible gain is small.
+- **T4b, fog:** fog colour and density table, per-polygon fog flag.
+- **T4c, toon and highlight shading:** a table lookup on vertex colour.
+- **T4d, anti-aliasing:** the field turns it on (DISP3DCNT bit 4). The DS smooths polygon edges.
+  The GPU can approximate this by supersampling the 3D layer.
+- **T4e, translucent sorting:** the DS's Y-sort and manual-sort modes for translucent polygons.
+- **T4f, rear-plane:** a bitmap behind the 3D instead of a flat clear colour.
+- **T4g, shadow polygons ⚠:** the DS's two-pass stencil shadows, mapped onto the GPU's stencil.
+- **T4h, display capture ⚠:** some effects capture the 3D picture into VRAM and draw it again.
+  It needs a GPU-to-shadow-VRAM path.
+
+**T5: Direct 3D writes from assembly**
+- `sub_02015E64`, `sub_020161CC` and `ov41_022465D8` write 3D command registers directly. Route
+  them through the port's command path.
+- HANDOFF.md's git history has a decoded plan for them.
+
+**T6a–c: OS**
+- **T6a, threads:** implement `OS_CreateThread` and the scheduler calls with 3DS
+  threads. Overlays 13 and 112 need it; today it's fatal.
+- **T6b, soft reset:** L+R+Start+Select is fatal today. The simplest fix relaunches the
+  title; a true in-process reset needs all state reinitialised.
+- **T6c, real interrupts ⚠:** VBlank as a real event rather than a call inside
+  `OS_WaitIrq`. A design change with timing risk.
+
+**T7a–e: 2D gaps**
+- **T7a, WINOUT leftover:** overlay 7 derives bits from WINOUT's moved address
+  (`lsr r1, r0, #13`) and gets different bits than on the DS.
+- **T7b, mosaic.**
+- **T7c, bitmap sprites.**
+- **T7d, H-blank effects:** per-line register changes, such as wavy screens.
+- **T7e, VRAM bank remapping ⚠:** today each VRAM window is its own memory. A first
+  attempt to model the banks broke battles.
+
+**T8: Native 2D ⚠**
+- Update GPU textures when the game loads graphics (BgConfig, `GX_LoadBG*`, `GX_LoadOBJ`,
+  palette loads, the 2D library's cell and sprite managers), instead of rebuilding everything
+  from VRAM every frame.
+- Keep a shadow-VRAM fallback, since the game also writes VRAM directly.
+
+**T9a–c: Assembly → C and what it unlocks**
+- **T9a ⚠:** removes the address-rewriting layer behind most hardware-only crashes.
+  Check the all-C fork's license first; the fork's C may not match our build exactly.
+- **T9b:** once calls resolve by name, the overlay trampolines can go.
+- **T9c:** drop the copied Metrowerks quirks (u64 alignment, flag-returning float
+  compares).
+
+**T10: Native sound channels**
+- Give each DS channel its own 3DS sound channel. 3DS hardware plays PCM8, PCM16 and its own
+  ADPCM, but not the DS's ADPCM, square waves or noise, so some software synthesis stays.
+- Today's mixer already works on its own core, so this is low priority.
+
+**T11: Wireless ⚠**
+- Map the DS wireless manager onto 3DS local wireless. A separate project.
+
+**T12a–d: Smaller items**
+- **T12a, RTC:** the clock uses UTC; switch to local time.
+- **T12b, microphone.**
+- **T12c, `.3dsx` build.**
+- **T12d, cheat regions:** codes pointing into unnamed memory are skipped today.
+
+**T13: Docs**
+- Fold the still-valid parts of HANDOFF.md's "Open items" into this file and mark the rest as
+  history.
 
 ---
 
