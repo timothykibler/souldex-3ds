@@ -1674,7 +1674,9 @@ static void draw_edges(void) {
         }
     }
     for (int s = 1; s < 6; s++) C3D_TexEnvInit(C3D_GetTexEnv(s));
-    C3D_TexBind(1, NULL);
+    // (unit 1 back to a texture that always exists: citro3d 1.7.1 reads a bound texture's type
+    // on units 1-2, so NULL there is a null dereference on the 3DS (Azahar reads zeros instead))
+    C3D_TexBind(1, &sShade);
 }
 
 // Whether this frame's 3D is a scene to widen: the 3D layer on the top screen, over the whole DS
