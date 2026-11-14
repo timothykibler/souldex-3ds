@@ -210,7 +210,12 @@ static void adpcm_step(Chan *c) {  // decode sample c->at + 1
 static void chan_start(int i) {
     Chan *c = &sCh[i];
     u32 cnt = REG32(0x400 + i * 16);
-    c->data = (const u8 *)REG32(0x404 + i * 16);
+    u32 sad = REG32(0x404 + i * 16);
+    // (a sample at a DS main-memory address, 0x02000000-0x023FFFFF, as some of the game's own
+    // sound code hands the driver: the port's copy of it is PORT_DS_DELTA higher. Reading it
+    // where it is crashed on hardware, on a move's sound effect.)
+    if (sad >= 0x02000000 && sad < 0x02400000) sad += 0x08000000;
+    c->data = (const u8 *)sad;
     u32 tmr = REG16(0x408 + i * 16), pnt = REG16(0x40A + i * 16), len = REG32(0x40C + i * 16) & 0x3FFFFF;
     c->format = (cnt >> 29) & 3;
     c->repeat = (cnt >> 27) & 3;

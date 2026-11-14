@@ -1858,26 +1858,33 @@ static int covers(const G3Frame *f, float px, float py) {
     return 0;
 }
 
+static int sWideNow;  // (want_wide: switch off at once, no hysteresis: a wipe starting)
 static int want_wide(const G3Frame *f, int screenW) {
+    sWideNow = 0;
     if (port_wide_mode == 0 || screenW != 400) return 0;
     if (f->viewport[0] != 0 || f->viewport[2] != 255 || f->viewport[1] != 0 || f->viewport[3] != 191) return 0;
     u32 dispcnt = rd32(DS(0x04000000));
     if (!(dispcnt & 8) || !(dispcnt & 0x100)) return 0;
+    // (windows on: a wipe or another masked effect, drawn for the DS picture only: not widened)
+    if (dispcnt & 0xE000) { sWideNow = 1; return 0; }
     if (port_wide_mode == 2) return 1;
-    // (corners in clip space, y up, a few pixels in; one corner a frame, the last result of each kept)
-    static const float cx[4] = { -1, 1, -1, 1 }, cy[4] = { 1, 1, -1, -1 };
-    static u8 hit[4];
+    // Does the 3D cover the widened screen, not just the DS picture? (The game builds only what
+    // the DS's view needs: panning, the widened sides can be empty, black wedges.) The widened
+    // screen's corners and edge midpoints, in the DS's clip space (it spans sW / 256 by sH / 192),
+    // a few pixels in; one point a frame, the last result of each kept.
+    const float ex = sW / 256.0f * (1 - 4 / sW), ey = sH / 192.0f * (1 - 4 / sH);
+    static const float px[8] = { -1, 1, -1, 1, -1, 1, 0, 0 }, py[8] = { 1, 1, -1, -1, 0, 0, 1, -1 };
+    static u8 hit[8];
     static int next;
-    const float ix = 1 - 4 / 128.0f, iy = 1 - 4 / 96.0f;
-    hit[next] = (u8)covers(f, cx[next] * ix, cy[next] * iy);
-    next = (next + 1) & 3;
-    return hit[0] && hit[1] && hit[2] && hit[3];
+    hit[next] = (u8)covers(f, px[next] * ex, py[next] * ey);
+    next = (next + 1) & 7;
+    for (int k = 0; k < 8; k++) if (!hit[k]) return 0;
+    return 1;
 }
-
 static int wide_stable(int want) {
     static int state, count;
     if (want == state) { count = 0; return state; }
-    if (++count >= 4) { state = want; count = 0; }
+    if (sWideNow || ++count >= 4) { state = want; count = 0; }
     return state;
 }
 
