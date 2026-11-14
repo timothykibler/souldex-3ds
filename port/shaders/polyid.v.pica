@@ -1,7 +1,7 @@
 ; Edge marking's polygon-ID pass: positions and texture coordinates as poly.v.pica, the colour is
 ; (polygon ID, depth, 0, 1) with depth = A + B * z/w spread over the frame's range (larger is
 ; nearer; A = B = 0 for translucent polygons, which only clear the edge flag).
-.fvec xform      ; (x scale, y scale (negative), 0, 0)
+.fvec xform      ; (x scale, y scale (negative), x offset, y offset: clip units per w, the seam-fill pass)
 .fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
 .fvec stereo     ; (eye shift, convergence z/w, depth range, 0): x/w += shift * clamp(z/w - convergence, 0, range) (stereoscopic 3D)
 .fvec idp        ; (ID * 4 / 255, A, B, 0)
@@ -19,6 +19,8 @@
 .proc main
 	mul r0.x, xform.x, inpos.x
 	mul r0.y, xform.y, inpos.y
+	mul r6.xy, xform.zwzw, inpos.wwww
+	add r0.xy, r0.xy, r6.xy
 	mul r1.z, stereo.y, inpos.w
 	add r1.y, inpos.z, -r1.z
 	mul r1.w, stereo.z, inpos.w

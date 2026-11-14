@@ -1230,6 +1230,7 @@ extern const u32 edge_shbin_size;
 static DVLB_s *sDvlb3d, *sDvlbEdge;
 static shaderProgram_s sProg3d, sProgEdge;
 static C3D_RenderTarget *s3dTarget, *s3dTargetR, *sIdTargetR;
+static G3Vtx *sFarQuad;  // (the viewport at the far plane, for the depth reset)
 // Edge marking: each opaque pixel's polygon ID (R, as ID * 4) and depth (G, larger = nearer),
 // drawn into its own image against the 3D layer's depth buffer.
 typedef struct { float x, y, z, w, u0, v0, u1, v1; } VE;
@@ -1278,6 +1279,12 @@ static bool init3d(void) {
     shaderProgramInit(&sProgEdge);
     shaderProgramSetVsh(&sProgEdge, &sDvlbEdge->DVLE[0]);
     sVboEdge = linearAlloc(sizeof(VE) * 6 * 8);
+    sFarQuad = linearAlloc(sizeof(G3Vtx) * 6);
+    if (sFarQuad) {  // (the viewport, just inside the far plane: depth ~0, the clear depth)
+        static const float q[6][2] = { { -1, -1 }, { 1, -1 }, { -1, 1 }, { 1, -1 }, { 1, 1 }, { -1, 1 } };
+        for (int i = 0; i < 6; i++) sFarQuad[i] = (G3Vtx){ q[i][0], q[i][1], 0.999f, 1, 0, 0, 0, 255, 0, 0 };
+        GSPGPU_FlushDataCache(sFarQuad, sizeof(G3Vtx) * 6);
+    }
     if (!alloc3d()) return false;
     s3dReady = 1;
     return true;
@@ -1522,10 +1529,32 @@ static GPU_TEXTURE_WRAP_PARAM wrap_of(int repeat, int flip) {
 
 // ---------------------------------------------------------------- drawing a frame
 static float sClipX = 1.0f, sClipY = 1.0f;  // clip-space scale (widening)
-static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
+// The frame's polygons in batches: runs of consecutive polygons (their vertices contiguous) with
+// the same texture and GPU state, drawn with one call. 3DS games draw by material; the DS's
+// command stream comes polygon by polygon, mostly long runs of the same map material. Each
+// polygon's texture is looked up once a frame (texture_for hashes texture data); the batches
+// serve every pass that draws them (seam fill, the stereo eyes). Order is kept (translucency).
+typedef struct { C3D_Tex *tex; u32 key; u32 first, count; } Batch;
+static Batch *sBatch[2][2];   // [colour, ID][opaque, translucent]
+static u32 sNBatch[2][2], sBatchCap, sBatchFrame = ~0u;
+static const G3Frame *sBatchOf;
+
+static void build_batches(const G3Frame *f, u32 disp3d) {
+    if (sBatchFrame == sFrameNo && sBatchOf == f) return;
+    sBatchFrame = sFrameNo; sBatchOf = f;
+    if (f->np > sBatchCap) {
+        u32 cap = f->np + 256;
+        for (int a = 0; a < 2; a++)
+            for (int b = 0; b < 2; b++) {
+                Batch *n = realloc(sBatch[a][b], sizeof(Batch) * cap);
+                if (!n) { sNBatch[0][0] = sNBatch[0][1] = sNBatch[1][0] = sNBatch[1][1] = 0; return; }
+                sBatch[a][b] = n;
+            }
+        sBatchCap = cap;
+    }
+    sNBatch[0][0] = sNBatch[0][1] = sNBatch[1][0] = sNBatch[1][1] = 0;
     for (u32 i = 0; i < f->np; i++) {
         const G3Poly *p = &f->p[i];
-        if (p->translucent != translucent) continue;
         int fmt = (p->teximage >> 26) & 7;
         C3D_Tex *tex = NULL;
         if (fmt && (disp3d & 1)) {
@@ -1533,36 +1562,63 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
             poly_st_bounds(f, p, &s0, &s1, &t0, &t1);
             tex = texture_for(p->teximage, p->pltt, s0, s1, t0, t1);
         }
-        int mode = (p->polyattr >> 4) & 3;
-        C3D_TexEnv *env = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvInit(C3D_GetTexEnv(1));
-        if (tex) {
-            C3D_TexSetWrap(tex, wrap_of((p->teximage >> 16) & 1, (p->teximage >> 18) & 1), wrap_of((p->teximage >> 17) & 1, (p->teximage >> 19) & 1));
-            C3D_TexBind(0, tex);
-            if (mode == 1) {  // decal: texture over vertex colour by texture alpha
-                C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
-                C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
-                C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
-                C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
-                C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-            } else {  // modulate (toon/highlight approximated as modulate)
-                C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
-                C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
-            }
-        } else {
-            C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
-            C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+        int tr = p->translucent ? 1 : 0;
+        u32 wrap = (p->teximage >> 16) & 0xF;
+        int depthWrite = !tr || (p->polyattr & 0x800);
+        // colour: mode, wrap, depth "equal", depth write
+        u32 kc = ((p->polyattr >> 4) & 3) | wrap << 2 | ((p->polyattr >> 14) & 1) << 6 | (u32)depthWrite << 7;
+        // IDs: the polygon ID, wrap
+        u32 ki = ((p->polyattr >> 24) & 63) | wrap << 6;
+        u32 kk[2] = { kc, ki };
+        for (int k = 0; k < 2; k++) {
+            Batch *bs = sBatch[k][tr];
+            u32 *n = &sNBatch[k][tr];
+            Batch *last = *n ? &bs[*n - 1] : NULL;
+            if (last && last->tex == tex && last->key == kk[k] && last->first + last->count == p->first) last->count += p->count;
+            else bs[(*n)++] = (Batch){ tex, kk[k], p->first, p->count };
         }
-        // depth: translucent polygons write depth only when asked; "equal" test on request
-        int depthWrite = !translucent || (p->polyattr & 0x800);
-        C3D_DepthTest(true, (p->polyattr & 0x4000) ? GPU_EQUAL : GPU_GREATER, depthWrite ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
-        if (translucent && (disp3d & 8)) C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
-        else blend_off();
-        int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
-        C3D_AlphaTest(true, GPU_GREATER, aref);
-        if (tex) C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTc, 1.0f / tex->width, 1.0f / tex->height, 0, 0);
-        C3D_DrawArrays(GPU_TRIANGLES, (int)p->first, (int)p->count);
+    }
+}
+
+static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
+    build_batches(f, disp3d);
+    int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
+    C3D_AlphaTest(true, GPU_GREATER, aref);
+    if (translucent && (disp3d & 8)) C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ONE, GPU_ONE_MINUS_SRC_ALPHA);
+    else blend_off();
+    C3D_Tex *lastTex = (C3D_Tex *)1;
+    u32 lastKey = ~0u;
+    for (u32 i = 0; i < sNBatch[0][translucent]; i++) {
+        const Batch *b = &sBatch[0][translucent][i];
+        if (b->tex != lastTex || b->key != lastKey) {
+            int mode = b->key & 3;
+            C3D_TexEnv *env = C3D_GetTexEnv(0);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvInit(C3D_GetTexEnv(1));
+            if (b->tex) {
+                u32 w = b->key >> 2;
+                C3D_TexSetWrap(b->tex, wrap_of(w & 1, (w >> 2) & 1), wrap_of((w >> 1) & 1, (w >> 3) & 1));
+                C3D_TexBind(0, b->tex);
+                if (mode == 1) {  // decal: texture over vertex colour by texture alpha
+                    C3D_TexEnvSrc(env, C3D_RGB, GPU_TEXTURE0, GPU_PRIMARY_COLOR, GPU_TEXTURE0);
+                    C3D_TexEnvOpRgb(env, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_COLOR, GPU_TEVOP_RGB_SRC_ALPHA);
+                    C3D_TexEnvFunc(env, C3D_RGB, GPU_INTERPOLATE);
+                    C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+                    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+                } else {  // modulate (toon/highlight approximated as modulate)
+                    C3D_TexEnvSrc(env, C3D_Both, GPU_TEXTURE0, GPU_PRIMARY_COLOR, 0);
+                    C3D_TexEnvFunc(env, C3D_Both, GPU_MODULATE);
+                }
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTc, 1.0f / b->tex->width, 1.0f / b->tex->height, 0, 0);
+            } else {
+                C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
+                C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+            }
+            // depth: translucent polygons write depth only when asked; "equal" test on request
+            C3D_DepthTest(true, (b->key >> 6) & 1 ? GPU_EQUAL : GPU_GREATER, (b->key >> 7) & 1 ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+            lastTex = b->tex; lastKey = b->key;
+        }
+        C3D_DrawArrays(GPU_TRIANGLES, (int)b->first, (int)b->count);
     }
 }
 
@@ -1579,34 +1635,35 @@ static void draw_ids(const G3Frame *f, u32 disp3d, int translucent) {
     float zscale = zmax > zmin ? 0.996f / (zmax - zmin) : 0;
     // (depth = 0.004 + (zmax - z/w) * zscale = A + B * z/w; translucent: 0, never an edge)
     float A = translucent ? 0 : 0.004f + zmax * zscale, B = translucent ? 0 : -zscale;
-    for (u32 i = 0; i < f->np; i++) {
-        const G3Poly *p = &f->p[i];
-        if (p->translucent != translucent) continue;
-        int fmt = (p->teximage >> 26) & 7;
-        C3D_Tex *tex = NULL;
-        if (fmt && (disp3d & 1)) {
-            int s0, s1, t0, t1;
-            poly_st_bounds(f, p, &s0, &s1, &t0, &t1);
-            tex = texture_for(p->teximage, p->pltt, s0, s1, t0, t1);
+    build_batches(f, disp3d);
+    int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
+    C3D_AlphaTest(true, GPU_GREATER, aref);
+    C3D_Tex *lastTex = (C3D_Tex *)1;
+    u32 lastKey = ~0u;
+    for (u32 i = 0; i < sNBatch[1][translucent]; i++) {
+        const Batch *b = &sBatch[1][translucent][i];
+        if (b->tex != lastTex || (b->key >> 6) != (lastKey >> 6)) {
+            C3D_TexEnv *env = C3D_GetTexEnv(0);
+            C3D_TexEnvInit(env);
+            C3D_TexEnvSrc(env, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
+            C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+            if (b->tex) {
+                u32 w = b->key >> 6;
+                C3D_TexSetWrap(b->tex, wrap_of(w & 1, (w >> 2) & 1), wrap_of((w >> 1) & 1, (w >> 3) & 1));
+                C3D_TexBind(0, b->tex);
+                C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, 0, 0);
+                C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTcId, 1.0f / b->tex->width, 1.0f / b->tex->height, 0, 0);
+            } else {
+                C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+            }
+            C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
         }
-        C3D_TexEnv *env = C3D_GetTexEnv(0);
-        C3D_TexEnvInit(env);
-        C3D_TexEnvSrc(env, C3D_RGB, GPU_PRIMARY_COLOR, 0, 0);
-        C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
-        if (tex) {
-            C3D_TexSetWrap(tex, wrap_of((p->teximage >> 16) & 1, (p->teximage >> 18) & 1), wrap_of((p->teximage >> 17) & 1, (p->teximage >> 19) & 1));
-            C3D_TexBind(0, tex);
-            C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, 0, 0);
-        } else {
-            C3D_TexEnvSrc(env, C3D_Alpha, GPU_PRIMARY_COLOR, 0, 0);
+        if (b->key != lastKey) {
+            float id = (float)((b->key & 63) * 4) / 255.0f;  // (translucent: only G = 0 is written)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocIdp, id, A, B, 0);
         }
-        C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
-        int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
-        C3D_AlphaTest(true, GPU_GREATER, aref);
-        float id = (float)(((p->polyattr >> 24) & 63) * 4) / 255.0f;  // (translucent: only G = 0 is written)
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocIdp, id, A, B, 0);
-        if (tex) C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocTcId, 1.0f / tex->width, 1.0f / tex->height, 0, 0);
-        C3D_DrawArrays(GPU_TRIANGLES, (int)p->first, (int)p->count);
+        lastTex = b->tex; lastKey = b->key;
+        C3D_DrawArrays(GPU_TRIANGLES, (int)b->first, (int)b->count);
     }
 }
 
@@ -1821,6 +1878,39 @@ static void stereo_convergence(const G3Frame *f) {
 }
 
 // One eye's 3D layer (eye: 0 mono, -1 left, 1 right) into its own target.
+// ---------------------------------------------------------------- seam fill
+// The DS rasterizes polygon edges generously, so the small seams between the map's separately
+// built pieces are covered; the 3DS's GPU covers pixels exactly, and they show as 1-pixel cracks
+// (the clear colour through them; edge marking then outlines each one, black blobs). So the opaque
+// polygons are drawn twice: half a pixel off (x and y), then, after the depth is reset, as they
+// are. The second pass draws over everything it covers; the first survives only where nothing
+// was drawn: the cracks. Not for orthographic scenes (battles: flat sprites, no seams, where it
+// would only widen edges). The menu's "3D seams" row turns it off (settings.txt "seams off").
+int port_seam_fill = 1;
+static int sFlatScene;   // (this frame's 3D is orthographic)
+
+static void depth_reset(void) {  // (the bound target's depth to the far plane, over the viewport; colour untouched)
+    C3D_BindProgram(&sProg3d);
+    C3D_AttrInfo *ai = C3D_GetAttrInfo();
+    AttrInfo_Init(ai);
+    AttrInfo_AddLoader(ai, 0, GPU_FLOAT, 4);
+    AttrInfo_AddLoader(ai, 1, GPU_UNSIGNED_BYTE, 4);
+    AttrInfo_AddLoader(ai, 2, GPU_FLOAT, 2);
+    C3D_BufInfo *bi = C3D_GetBufInfo();
+    BufInfo_Init(bi);
+    BufInfo_Add(bi, sFarQuad, sizeof(G3Vtx), 3, 0x210);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, 1, 1, 0, 0);
+    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, 0, 0, 0, 0);
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_Both, GPU_PRIMARY_COLOR, 0, 0);
+    C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    blend_off();
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_DEPTH);
+    C3D_DrawArrays(GPU_TRIANGLES, 0, 6);
+}
+
 static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw, float vh, u32 disp3d, u32 clear) {
     C3D_RenderTarget *t = eye > 0 ? s3dTargetR : s3dTarget, *idt = eye > 0 ? sIdTargetR : sIdTarget;
     int ca = (clear >> 16) & 31;
@@ -1842,6 +1932,17 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
     C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
     C3D_CullFace(GPU_CULL_NONE);
     sIdCur = eye > 0 ? &sIdTexR : &sIdTex;
+    const int seams = port_seam_fill && !sFlatScene && sFarQuad;
+    const float ox = 1.0f / vw, oy = 1.0f / vh;  // (half a pixel, in clip units: 2 / size per pixel)
+    if (seams) {  // half a pixel off, then the depth reset (see "seam fill")
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, ox, oy);
+        draw_polys(f, 0, disp3d);
+        depth_reset();
+        C3D_BindProgram(&sProg3d);
+        attrs_3d(f);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
+    }
     draw_polys(f, 0, disp3d);
     if ((disp3d & 0x20) && idt && port_edge_mode) {
         // the IDs of what's visible, then the outlines over the opaque picture. (The DS marks
@@ -1855,6 +1956,16 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         C3D_BindProgram(&sProgId);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
+        if (seams) {  // (the IDs likewise: the outlines then see no cracks)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, ox, oy);
+            draw_ids(f, disp3d, 0);
+            depth_reset();
+            C3D_BindProgram(&sProgId);
+            attrs_3d(f);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
+            C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+        }
         draw_ids(f, disp3d, 0);
         // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
         C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_GREEN);
@@ -1893,6 +2004,11 @@ static void render3d(int screenW) {
     float vx = x1 - sL, vy = 191 - y2 - sT, vw = x2 - x1 + 1, vh = y2 - y1 + 1;
     sClipX = sClipY = 1.0f;
     if (sWide) { sClipX = vw / sW; sClipY = vh / sH; vx = vy = 0; vw = sW; vh = sH; }
+    if (port_seam_fill) {  // (orthographic: every vertex at one w)
+        float wm = 1e30f, wM = 0;
+        for (u32 i = 0; i < f->nv; i++) { float w = f->v[i].w; if (w < wm) wm = w; if (w > wM) wM = w; }
+        sFlatScene = f->nv == 0 || wM - wm <= wM * 0.001f;
+    }
     if (sStereo) {
         stereo_convergence(f);
         render3d_eye(f, -1, vx, vy, vw, vh, disp3d, clear);

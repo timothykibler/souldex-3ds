@@ -2,7 +2,7 @@
 ; G3Vtx, in GPU-visible memory): clip-space position as the DS computed it, colour as 4 bytes,
 ; texture coordinates in texels. Here: y flipped (render-to-texture), x/y scaled when the view is
 ; widened, the DS's z/w in -1..1 to the PICA's -w..0, colour to 0..1, texels to 0..1.
-.fvec xform      ; (x scale, y scale (negative), 0, 0)
+.fvec xform      ; (x scale, y scale (negative), x offset, y offset: clip units per w, the seam-fill pass)
 .fvec tcscale    ; (1 / texture width, 1 / texture height, 0, 0)
 .fvec stereo     ; (eye shift, convergence z/w, depth range, 0): x/w += shift * clamp(z/w - convergence, 0, range) (stereoscopic 3D)
 
@@ -19,6 +19,8 @@
 .proc main
 	mul r0.x, xform.x, inpos.x
 	mul r0.y, xform.y, inpos.y
+	mul r6.xy, xform.zwzw, inpos.wwww
+	add r0.xy, r0.xy, r6.xy
 	mul r1.z, stereo.y, inpos.w
 	add r1.y, inpos.z, -r1.z
 	mul r1.w, stereo.z, inpos.w
