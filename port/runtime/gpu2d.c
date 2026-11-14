@@ -1616,11 +1616,14 @@ static C3D_Tex *texture_for_(u32 teximage, u32 pltt, int s0, int s1, int t0, int
 
 // A polygon's texture-coordinate bounds (texels, from the geometry engine); beyond the texture
 // (repeating): all of it on that axis.
+int port_tex_whole;  // (debug.txt "texwhole": whole textures decoded, not the parts used)
 static void poly_st_bounds(const G3Frame *f, const G3Poly *p, int *s0, int *s1, int *t0, int *t1) {
     (void)f;
     int w = 8 << ((p->teximage >> 20) & 7), h = 8 << ((p->teximage >> 23) & 7);
     *s0 = (int)p->s0; *s1 = (int)p->s1 + 1; *t0 = (int)p->t0; *t1 = (int)p->t1 + 1;
-    if (p->s0 < 0 || p->s1 > w) { *s0 = 0; *s1 = w; }
+    extern int port_tex_whole;
+    if (port_tex_whole || p->s0 < 0 || p->s1 > w) { *s0 = 0; *s1 = w; }
+    if (port_tex_whole) { *t0 = 0; *t1 = h; }
     if (p->t0 < 0 || p->t1 > h) { *t0 = 0; *t1 = h; }
 }
 
@@ -1990,11 +1993,16 @@ static void stereo_convergence(const G3Frame *f) {
 // The DS rasterizes polygon edges generously, so the small seams between the map's separately
 // built pieces are covered; the 3DS's GPU covers pixels exactly, and they show as 1-pixel cracks
 // (the clear colour through them; edge marking then outlines each one, black blobs). So the opaque
-// polygons are drawn twice: half a pixel off (x and y), then, after the depth is reset, as they
-// are. The second pass draws over everything it covers; the first survives only where nothing
-// was drawn: the cracks. Not for orthographic scenes (battles: flat sprites, no seams, where it
+// polygons are drawn twice: half a pixel off (x and y) and pushed back a little, then as they
+// are. The second pass draws over itself; the first survives where nothing else of the scene
+// was nearer: the cracks. Not for orthographic scenes (battles: flat sprites, no seams, where it
 // would only widen edges). The menu's "3D seams" row turns it off (settings.txt "seams off").
 int port_seam_fill = 1;
+// The copy is also pushed back a little (depth, in clip units per w): the surface drawn as it is
+// then wins over its own copy, while what lies farther behind (water under a bridge, through a
+// crack between its pieces) loses to it: no depth reset, cracks filled over geometry too. (Edges
+// spread up to half a pixel over what's behind them: the DS's own edges are generous.)
+#define SEAM_BIAS 0.0005f
 static int sFlatScene;   // (this frame's 3D is orthographic)
 
 static void depth_reset(void) {  // (the bound target's depth to the far plane, over the viewport; colour untouched)
@@ -2044,15 +2052,12 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
     sIdCur = eye > 0 ? &sIdTexR : &sIdTex;
     const int seams = port_seam_fill && !sFlatScene && sFarQuad;
     const float ox = 1.0f / vw, oy = 1.0f / vh;  // (half a pixel, in clip units: 2 / size per pixel)
-    if (seams) {  // half a pixel off, then the depth reset (see "seam fill")
+    if (seams) {  // half a pixel off and a little farther back (see "seam fill")
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, ox, oy);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], SEAM_BIAS, 0);
         draw_polys(f, 0, disp3d);
-        depth_reset();
-        C3D_BindProgram(&sProg3d);
-        attrs_3d(f);
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
-    C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
+        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
     }
     draw_polys(f, 0, disp3d);
     if ((disp3d & 0x20) && idt && port_edge_mode) {
@@ -2070,14 +2075,10 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
         if (seams) {  // (the IDs likewise: the outlines then see no cracks)
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, ox, oy);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], SEAM_BIAS, 0);
             draw_ids(f, disp3d, 0);
-            depth_reset();
-            C3D_BindProgram(&sProgId);
-            attrs_3d(f);
             C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXformId, sClipX, -sClipY, 0, 0);
-            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereoId, shift, sConv, range, 0);
-        C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
-            C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_ALL);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbufId, sWbuf[0], sWbuf[1], 0, 0);
         }
         draw_ids(f, disp3d, 0);
         // a translucent pixel over an opaque one clears its edge flag (the opaque ID stays): G = 0
