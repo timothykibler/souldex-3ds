@@ -127,8 +127,8 @@ takes over the SDK or library call that would have driven it.
   uniforms, and let the PICA do the transform and lighting the way 3DS games do.
 - **Smaller intermediate steps:**
   1. Finish the core-2 geometry worker (T1 in section 5).
-  2. Cache display lists whose contents and state repeat. pspoke, a PSP port of the same game,
-     cut outdoor 3D from 19 to 5 ms this way.
+  2. ~~Cache display lists whose contents and state repeat~~ done (T3a): the field's
+     geometry engine went from ~10 to ~5.4 ms per frame in Azahar.
   3. Transform on the PICA while keeping the command stream as input.
 - **Watch out for:** the game reads matrices back (clip matrix, position and box tests), so those
   answers must stay exact in DS fixed point.
@@ -213,7 +213,7 @@ history so far, for example:
 |---|---|---|---|---|
 | **T1** | ~~Fix the New 3DS geometry worker's sprite bug~~ done (on by default; `g3thread 0` turns it off) | — | — | — |
 | **T2** | Measure speed on both 3DS models | S | ~15 min (plus your time at the 3DS) | T1 helps but isn't required |
-| **T3a** | 3D display-list caching | M | 2–4 h | — |
+| **T3a** | ~~3D display-list caching~~ done: field geometry engine about halved (`dlcache 0` turns it off) | — | — | — |
 | **T3b** | Native 3D prototype: the map drawn through the game's 3D library | L ⚠ | 4–8 h | — (T3a's findings help) |
 | **T3c** | Native 3D for everything: characters, battles, effects | XL ⚠ | 15–30 h | T3b |
 | **T4a** | Edge colours per polygon ID | S | 15–30 min | — |
@@ -293,12 +293,30 @@ native path still has to compute those on the CPU, even when the GPU does the dr
   3DS XL.
 - The SD card is no longer connected, so read the on-screen frame counter or use the Wi-Fi log.
 
-**T3a: Display-list caching**
-- When a display list's contents and the 3D state it starts from repeat, reuse last frame's
-  transformed triangles instead of running the geometry engine again.
-- **The hard part** is knowing exactly which state a list depends on: matrices, lights,
-  materials, and anything the game reads back.
-- Verify pixel-for-pixel against the current path with `debug.txt` dumps.
+**T3a: Display-list caching (done)**
+- **What it does:** `gx3d.c` records a display list (one FIFO send) the first time it runs:
+  its vertices in model space, with colour, lighting and texture coordinates applied, and its
+  calls to polygon assembly. When the same words arrive again with the same starting state, it
+  replays them: only the clip transform and polygon assembly run. Decoding, lighting and strip
+  assembly are skipped.
+- **Why model space, not transformed triangles:** the camera moves every frame while walking,
+  so the clip matrix isn't part of the key. Repeated models such as trees share one entry.
+- **The key:** the list's words (hash, then an exact compare) and the vertex state it starts
+  from. The direction and texture matrices count only when the list reads them. Lists that hold
+  matrix, test, swap or viewport commands aren't cached.
+- **Scrolling textures:** water and flowers move their texture matrix every frame. Their lists
+  use texture-coordinate mode 1, so the replay keeps the raw coordinates and applies the
+  current texture matrix in exact fixed point.
+- **Results, Azahar, field, engine inline (`g3thread 0`):** 96–98% of the display-list words
+  replayed, standing or walking, with nothing re-recorded per frame. The geometry engine went
+  from 9.4–10.9 ms to 5.4 ms per frame. Screenshots with `dlcache 0` and `dlcache 1` are
+  byte-identical; only the debug overlay's timing text differs.
+- **Battles** send no display lists: their 3D arrives through the command ports, so the cache
+  doesn't apply there.
+- **Memory:** a 3 MB budget; when it fills, everything is dropped and recorded again.
+- **For T3b:** the map's shape lists contain no matrix commands. The 3D library sets each
+  model's matrices in separate small sends, so "upload each shape once" maps cleanly onto these
+  lists.
 
 **T3b: Native 3D prototype for the map ⚠**
 - Draw the map's models through the game's 3D library, behind a `debug.txt` switch, and compare

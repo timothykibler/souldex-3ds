@@ -8,6 +8,7 @@
 // Conventions follow GBATEK: row vectors (v' = v * M), MULT is M = N * M, the clip matrix is
 // position * projection, primitives are triangles, quads and their strips.
 #include <math.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include "gx3d.h"
@@ -18,6 +19,7 @@ extern float port_g3_wide, port_g3_wide_y;
 void *port_linear_alloc(size_t bytes);
 
 typedef int32_t s32;
+typedef int16_t s16;
 typedef int64_t s64;
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -133,6 +135,12 @@ static u32 sColor = 0x7FFF;             // vertex colour, 15-bit
 static s32 sVx, sVy, sVz;              // the last vertex (4.12), for VTX_XY / XZ / YZ / DIFF
 static s32 sS, sT;                     // texture coordinates (12.4 texels), as given
 static s32 sTs, sTt;                   // transformed
+static int sTexSrc;                    // (1: sTs / sTt are sS / sT through the texture matrix, TEXCOORD in mode 1)
+// TEXCOORD in mode 1: the coordinates through the texture matrix
+static inline void tex_mode1(s32 s, s32 t, s32 *ts, s32 *tt) {
+    *ts = (s32)(((s64)s * sTex[0] + (s64)t * sTex[4] + sTex[8] + sTex[12]) >> 12);
+    *tt = (s32)(((s64)s * sTex[1] + (s64)t * sTex[5] + sTex[9] + sTex[13]) >> 12);
+}
 static u32 sPolyAttr, sPolyAttrNext, sTexImage, sPltt;
 static int sPrim = -1;                 // primitive type of the current BEGIN_VTXS
 static u32 sDifAmb, sSpeEmi, sLightColor[4];
@@ -152,6 +160,20 @@ static int sBuild = 0, sShown = 1, sHaveShown, sSwapPending;
 static G3Vtx sPrimVtx[4];    // vertices of the primitive being assembled
 static int sPrimN, sPrimCount;
 
+// Display-list recording (see "display-list cache" below): while a list runs for the first time,
+// its vertices in model space and its calls to emit_triangles are written down.
+typedef struct { u32 attr, tex, pltt; u16 idx[4]; u8 n; } DlEmit;
+typedef struct { G3Vtx v; s16 s, t; u32 texsrc; } DlVtx;  // (texsrc: s, t through the texture matrix at replay)
+#define REC_MAXV 4096
+#define REC_MAXE 4096
+#define NO_IDX 0xFFFFu
+static int sRecording, sRecBad, sRecImpure;
+static int sRecTsSet, sRecTsRead, sRecTexRead, sRecVecRead;  // (what a list reads of the state it starts from)
+static u32 sRecNV, sRecNE;
+static DlVtx *sRecV;            // (x, y, z: the vertex as given, before any matrix)
+static DlEmit *sRecE;
+static u16 sPrimIdx[4];         // (sPrimVtx's vertices' indices in sRecV)
+
 static void frames_init(void) {
     for (int i = 0; i < 3; i++) {
         sFrames[i].v = port_linear_alloc(sizeof(G3Vtx) * MAX_VTX);  // (drawn from where it is: GPU-visible)
@@ -163,6 +185,14 @@ static int alpha_of(u32 attr) { return (attr >> 16) & 31; }
 
 int port_g3_prof;  // (debug.txt "g3prof N", timing by ablation: 1 no polygon assembly, 2 no vertex work, 3 decode only)
 static void emit_triangles(const G3Vtx *const *v, int n) {  // (pointers: the strips' vertices aren't copied to reorder them)
+    if (sRecording) {  // (written down whatever happens next: culling depends on the matrices)
+        if (sRecNE >= REC_MAXE) sRecBad = 1;
+        else {
+            DlEmit *e = &sRecE[sRecNE++];
+            e->attr = sPolyAttr; e->tex = sTexImage; e->pltt = sPltt; e->n = (u8)n;
+            for (int i = 0; i < n; i++) if ((e->idx[i] = sPrimIdx[v[i] - sPrimVtx]) == NO_IDX) sRecBad = 1;
+        }
+    }
     if (port_g3_prof == 1) return;
     // n = 3 (triangle) or 4 (quad, as two triangles)
     G3Frame *f = &sFrames[sBuild];
@@ -229,6 +259,17 @@ static void snap_to_pixels(G3Vtx *v) {
     v->y = (floorf((ny + 1) * hh + 0.5f) / hh - 1) * v->w;
 }
 
+// A vertex through the clip matrix (one function for the geometry engine and the display-list
+// cache's replay, so both give the same bits).
+static inline void transform(G3Vtx *v, float fx, float fy, float fz) {
+    const float *M = sClipF;
+    v->x = fx * M[0] + fy * M[4] + fz * M[8] + M[12];
+    v->y = fx * M[1] + fy * M[5] + fz * M[9] + M[13];
+    v->z = fx * M[2] + fy * M[6] + fz * M[10] + M[14];
+    v->w = fx * M[3] + fy * M[7] + fz * M[11] + M[15];
+    if (port_g3_snap && v->w > 0) snap_to_pixels(v);
+}
+
 static void add_vertex(s32 x, s32 y, s32 z) {
     sVx = x; sVy = y; sVz = z;
     if (sPrim < 0 || port_g3_prof == 2) return;
@@ -238,12 +279,8 @@ static void add_vertex(s32 x, s32 y, s32 z) {
     static u8 sR, sG, sB, sA;  // (the colour and alpha as bytes, converted when they change)
     // (in float: what the GPU draws needn't match the DS's fixed point to the last bit, and the
     // 64-bit products and their conversions were most of the geometry engine's time)
-    const float fx = (float)x, fy = (float)y, fz = (float)z, *M = sClipF;
-    v.x = fx * M[0] + fy * M[4] + fz * M[8] + M[12];
-    v.y = fx * M[1] + fy * M[5] + fz * M[9] + M[13];
-    v.z = fx * M[2] + fy * M[6] + fz * M[10] + M[14];
-    v.w = fx * M[3] + fy * M[7] + fz * M[11] + M[15];
-    if (port_g3_snap && v.w > 0) snap_to_pixels(&v);
+    const float fx = (float)x, fy = (float)y, fz = (float)z;
+    transform(&v, fx, fy, fz);
     if (sColor != sLastColor) {
         sLastColor = sColor;
         int r = sColor & 31, g = (sColor >> 5) & 31, b = (sColor >> 10) & 31;
@@ -252,12 +289,25 @@ static void add_vertex(s32 x, s32 y, s32 z) {
     if (sPolyAttr != sLastAttr) { sLastAttr = sPolyAttr; int a = alpha_of(sPolyAttr); sA = (u8)(a << 3 | a >> 2); }
     v.r = sR; v.g = sG; v.b = sB; v.a = sA;
     s32 ts = sTs, tt = sTt;
-    if ((sTexImage >> 30) == 3) {  // texture coordinates from the vertex
+    if ((sTexImage >> 30) != 3) { if (!sRecTsSet) sRecTsRead = 1; }
+    else {  // texture coordinates from the vertex
+        sRecTexRead = 1;
         ts = sS + (s32)(((s64)x * sTex[0] + (s64)y * sTex[4] + (s64)z * sTex[8]) >> 24);
         tt = sT + (s32)(((s64)x * sTex[1] + (s64)y * sTex[5] + (s64)z * sTex[9]) >> 24);
     }
     v.s = ts * (1.0f / 16.0f); v.t = tt * (1.0f / 16.0f);
 
+    u16 idx = NO_IDX;
+    if (sRecording) {
+        if (sRecNV >= REC_MAXV) sRecBad = 1;
+        else {
+            DlVtx *m = &sRecV[sRecNV];
+            m->v = v; m->v.x = fx; m->v.y = fy; m->v.z = fz; m->v.w = 1;
+            m->texsrc = (sTexImage >> 30) != 3 && sTexSrc && sRecTsSet; m->s = (s16)sS; m->t = (s16)sT;
+            idx = (u16)sRecNV++;
+        }
+    }
+    sPrimIdx[sPrimN] = idx;
     sPrimVtx[sPrimN++] = v;
     sPrimCount++;
     const G3Vtx *P = sPrimVtx;
@@ -274,6 +324,7 @@ static void add_vertex(s32 x, s32 y, s32 z) {
             const G3Vtx *t[3] = { odd ? P : P + 1, odd ? P + 1 : P, P + 2 };
             emit_triangles(t, 3);
             sPrimVtx[0] = sPrimVtx[1]; sPrimVtx[1] = sPrimVtx[2]; sPrimN = 2;
+            sPrimIdx[0] = sPrimIdx[1]; sPrimIdx[1] = sPrimIdx[2];
         }
         break;
     case 3:  // quad strip: each new pair with the pair before it
@@ -281,6 +332,7 @@ static void add_vertex(s32 x, s32 y, s32 z) {
             const G3Vtx *q[4] = { P, P + 1, P + 3, P + 2 };
             emit_triangles(q, 4);
             sPrimVtx[0] = sPrimVtx[2]; sPrimVtx[1] = sPrimVtx[3]; sPrimN = 2;
+            sPrimIdx[0] = sPrimIdx[2]; sPrimIdx[1] = sPrimIdx[3];
         }
         break;
     }
@@ -290,9 +342,11 @@ static void add_vertex(s32 x, s32 y, s32 z) {
 static void normal(u32 p) {
     s32 nx = (s32)(p << 22) >> 22, ny = (s32)(p << 12) >> 22, nz = (s32)(p << 2) >> 22;  // 1.0.9
     if ((sTexImage >> 30) == 2) {  // texture coordinates from the normal
+        sTexSrc = 0; sRecTsSet = 1; sRecTexRead = 1;
         sTs = sS + (s32)(((s64)nx * sTex[0] + (s64)ny * sTex[4] + (s64)nz * sTex[8]) >> 21);
         sTt = sT + (s32)(((s64)nx * sTex[1] + (s64)ny * sTex[5] + (s64)nz * sTex[9]) >> 21);
     }
+    sRecVecRead = 1;
     // the normal through the direction matrix (to .12)
     float n[3];
     for (int k = 0; k < 3; k++) n[k] = ((float)nx * sVec[0 * 4 + k] + (float)ny * sVec[1 * 4 + k] + (float)nz * sVec[2 * 4 + k]) * (1.0f / (512.0f * 4096.0f));
@@ -367,6 +421,14 @@ static const u8 kParams[256] = {
     [0x40] = 1, [0x41] = 0, [0x50] = 1, [0x60] = 1, [0x70] = 3, [0x71] = 2, [0x72] = 1,
 };
 
+// The commands a cached display list may hold: they read the matrices but don't change them, and
+// leave no result for the game to read (no tests, no swap, no viewport). The rest are 1.
+static const u8 kPure[256] = {
+    [0x00] = 1, [0x10] = 1, [0x20] = 1, [0x21] = 1, [0x22] = 1, [0x23] = 1, [0x24] = 1, [0x25] = 1,
+    [0x26] = 1, [0x27] = 1, [0x28] = 1, [0x29] = 1, [0x2A] = 1, [0x2B] = 1,
+    [0x30] = 1, [0x31] = 1, [0x32] = 1, [0x33] = 1, [0x34] = 1, [0x40] = 1, [0x41] = 1,
+};
+
 static void run_cmd(u8 cmd, const u32 *p);
 
 static u32 sHist[128], sTraceLeft;
@@ -380,6 +442,7 @@ static void run(u8 cmd, const u32 *p) {
         port_log("\n");
     }
     if (port_g3_prof == 3) return;
+    if (sRecording && !kPure[cmd]) sRecImpure = 1;
     run_cmd(cmd, p);
 }
 void port_g3_hist_report(void) {  // (the command mix since the last report, per frame)
@@ -477,10 +540,9 @@ static void run_cmd(u8 cmd, const u32 *p) {
     case 0x22:
         sS = (int16_t)p[0]; sT = (int16_t)(p[0] >> 16);
         sTs = sS; sTt = sT;
-        if ((sTexImage >> 30) == 1) {
-            sTs = (s32)(((s64)sS * sTex[0] + (s64)sT * sTex[4] + sTex[8] + sTex[12]) >> 12);
-            sTt = (s32)(((s64)sS * sTex[1] + (s64)sT * sTex[5] + sTex[9] + sTex[13]) >> 12);
-        }
+        sTexSrc = (sTexImage >> 30) == 1;
+        if (sTexSrc) tex_mode1(sS, sT, &sTs, &sTt);
+        sRecTsSet = 1;
         break;
     case 0x23: add_vertex((int16_t)p[0], (int16_t)(p[0] >> 16), (int16_t)p[1]); break;
     case 0x24: add_vertex((s32)(p[0] << 22) >> 16, (s32)(p[0] << 12) >> 16, (s32)(p[0] << 2) >> 16); break;
@@ -492,7 +554,7 @@ static void run_cmd(u8 cmd, const u32 *p) {
         add_vertex(sVx + ((s32)(p[0] << 22) >> 22), sVy + ((s32)(p[0] << 12) >> 22), sVz + ((s32)(p[0] << 2) >> 22));
         break;
     case 0x29: sPolyAttrNext = p[0]; break;
-    case 0x2A: sTexImage = p[0]; sTs = sS; sTt = sT; break;
+    case 0x2A: sTexImage = p[0]; sTs = sS; sTt = sT; sTexSrc = 0; sRecTsSet = 1; break;
     case 0x2B: sPltt = p[0] & 0x1FFF; break;
     case 0x30:
         sDifAmb = p[0];
@@ -501,6 +563,7 @@ static void run_cmd(u8 cmd, const u32 *p) {
     case 0x31: sSpeEmi = p[0]; sUseShininess = (p[0] >> 15) & 1; break;
     case 0x32: {  // light vector, through the direction matrix
         int i = p[0] >> 30;
+        sRecVecRead = 1;
         s32 lx = (s32)(p[0] << 22) >> 22, ly = (s32)(p[0] << 12) >> 22, lz = (s32)(p[0] << 2) >> 22;
         for (int k = 0; k < 3; k++)
             sLightVec[i][k] = (s32)(((s64)lx * sVec[k] + (s64)ly * sVec[4 + k] + (s64)lz * sVec[8 + k]) >> 9);
@@ -582,10 +645,7 @@ static void fifo_write_impl(u32 word) {
     }
 }
 
-uint64_t gG3Ticks;  // (profiling: CPU time in the geometry engine, display lists and register writes)
-uint64_t port_ctr_ticks(void);
-static void fifo_send_impl(const u32 *src, u32 words) {
-    uint64_t t = port_ctr_ticks();
+static void fifo_decode(const u32 *src, u32 words) {
     const u32 *s = src, *end = s + words;
     // (a packed command word still waiting for parameters: finished word by word first)
     while (s < end && sFifoNCmd) fifo_write_impl(*s++);
@@ -610,7 +670,6 @@ static void fifo_send_impl(const u32 *src, u32 words) {
                 memcpy(sFifoCmds, cmds, 4);
                 sFifoNCmd = n; sFifoCur = i; sFifoN = 0;
                 while (s < end) fifo_write_impl(*s++);
-                gG3Ticks += port_ctr_ticks() - t;
                 return;
             }
             run(c, s);
@@ -618,6 +677,184 @@ static void fifo_send_impl(const u32 *src, u32 words) {
             sFifoWords += np;
         }
     }
+}
+
+// ---------------------------------------------------------------- display-list cache
+// The game draws the same models every frame: the map's blocks, buildings, trees, the same NPCs.
+// A display list (one send of words to the FIFO) that holds only vertex and material commands
+// (kPure), sent again with the same words and the same starting state, gives the same vertices in
+// model space, the same colours (lighting included), the same texture coordinates and the same
+// calls to emit_triangles. So the first run is written down, and later ones only put the recorded
+// vertices through the current clip matrix and emit them, skipping the decoding, the lighting and
+// the strips' assembly. The clip matrix isn't part of the key: the camera moves every frame while
+// walking, and instanced models (trees) share one entry. The direction and texture matrices are
+// (lighting and texture coordinates depend on them); they change only when a model turns.
+// The replay gives the same bits as running the list (the same transform, the same emits).
+// debug.txt "dlcache 0" turns it off.
+int port_dl_cache = 1;
+
+typedef struct {  // the state a list's commands read or change (besides the clip matrix)
+    u32 color; s32 vx, vy, vz, s, t;
+    u32 polyattr, polyattrNext, teximage, pltt;
+    s32 prim, primN, primCount, mode;
+    u32 difamb, speemi, lightColor[4];
+    s32 lightVec[4][3];
+    s32 useShininess, texsrc;
+    u8 shininess[128];
+    // (compared only when the list reads them: the rest from here on; read only, the matrices)
+    s32 ts, tt;
+    Mtx vec, tex;
+} VState;
+#define DL_READS_TS  1
+#define DL_READS_VEC 2
+#define DL_READS_TEX 4
+#define DL_SETS_TS   8  // (otherwise the coordinates it ends with are those it started with)
+
+static void vstate_save(VState *v) {
+    memset(v, 0, offsetof(VState, ts));  // (compared with memcmp)
+    v->color = sColor; v->vx = sVx; v->vy = sVy; v->vz = sVz; v->s = sS; v->t = sT; v->ts = sTs; v->tt = sTt;
+    v->polyattr = sPolyAttr; v->polyattrNext = sPolyAttrNext; v->teximage = sTexImage; v->pltt = sPltt;
+    v->prim = sPrim; v->primN = sPrimN; v->primCount = sPrimCount; v->mode = sMode;
+    v->difamb = sDifAmb; v->speemi = sSpeEmi;
+    memcpy(v->lightColor, sLightColor, sizeof(sLightColor)); memcpy(v->lightVec, sLightVec, sizeof(sLightVec));
+    v->useShininess = sUseShininess; v->texsrc = sTexSrc; memcpy(v->shininess, sShininess, sizeof(sShininess));
+    memcpy(v->vec, sVec, sizeof(Mtx)); memcpy(v->tex, sTex, sizeof(Mtx));
+}
+static void vstate_load(const VState *v) {
+    sColor = v->color; sVx = v->vx; sVy = v->vy; sVz = v->vz; sS = v->s; sT = v->t; sTs = v->ts; sTt = v->tt;
+    sPolyAttr = v->polyattr; sPolyAttrNext = v->polyattrNext; sTexImage = v->teximage; sPltt = v->pltt;
+    sPrim = v->prim; sPrimN = v->primN; sPrimCount = v->primCount; sMode = v->mode;
+    sDifAmb = v->difamb; sSpeEmi = v->speemi;
+    memcpy(sLightColor, v->lightColor, sizeof(sLightColor)); memcpy(sLightVec, v->lightVec, sizeof(sLightVec));
+    sUseShininess = v->useShininess; sTexSrc = v->texsrc; memcpy(sShininess, v->shininess, sizeof(sShininess));
+}
+
+typedef struct DlEntry {
+    struct DlEntry *next;
+    u32 hash, words, nv, ne, bytes, reads;
+    VState start, end;
+    u16 endIdx[4];       // (the primitive left pending at the end: its vertices)
+    DlVtx *v;            // nv vertices in model space
+    DlEmit *e;           // ne emits
+    u32 *data;           // the list's words
+} DlEntry;
+
+#define DL_BUCKETS 1024
+#define DL_BUDGET (3u << 20)   // (bytes; past it, everything is dropped and recorded afresh)
+#define DL_VARIANTS 8          // (entries per list: one per starting state, e.g. lighting)
+#define DL_MIN_WORDS 16        // (smaller sends: the matrices and materials the 3D library buffers)
+static DlEntry *sDl[DL_BUCKETS];
+static u32 sDlBytes;
+static u32 sImpure[256];       // (hashes of lists seen to hold other commands: not recorded again)
+static VState sCur;
+static G3Vtx *sReplay;
+uint32_t gDlStats[6];          // hits, recorded, impure, not cacheable, words replayed, words sent
+
+static void dl_flush(void) {
+    for (int b = 0; b < DL_BUCKETS; b++) {
+        for (DlEntry *e = sDl[b], *n; e; e = n) { n = e->next; free(e); }
+        sDl[b] = NULL;
+    }
+    sDlBytes = 0;
+}
+
+static u32 dl_hash(const u32 *w, u32 n) {
+    u32 a = n * 0x9E3779B1u, b = 0x85EBCA6Bu;
+    u32 i = 0;
+    for (; i + 1 < n; i += 2) { a = (a ^ w[i]) * 0x01000193u; b = (b ^ w[i + 1]) * 0x01000193u; }
+    if (i < n) a = (a ^ w[i]) * 0x01000193u;
+    return a ^ (b * 0x2C1B3C6Du) ^ (b >> 15);
+}
+
+static void dl_replay(const DlEntry *e) {
+    if (sClipDirty) update_clip();
+    for (u32 i = 0; i < e->nv; i++) {
+        G3Vtx *o = &sReplay[i];
+        const DlVtx *r = &e->v[i];
+        *o = r->v;
+        transform(o, r->v.x, r->v.y, r->v.z);
+        if (r->texsrc) { s32 ts, tt; tex_mode1(r->s, r->t, &ts, &tt); o->s = ts * (1.0f / 16.0f); o->t = tt * (1.0f / 16.0f); }
+    }
+    for (u32 i = 0; i < e->ne; i++) {
+        const DlEmit *m = &e->e[i];
+        sPolyAttr = m->attr; sTexImage = m->tex; sPltt = m->pltt;
+        const G3Vtx *pv[4];
+        for (int k = 0; k < m->n; k++) pv[k] = &sReplay[m->idx[k]];
+        emit_triangles(pv, m->n);
+    }
+    s32 ts0 = sTs, tt0 = sTt;
+    vstate_load(&e->end);
+    if (!(e->reads & DL_SETS_TS)) { sTs = ts0; sTt = tt0; }
+    else if (sTexSrc) tex_mode1(sS, sT, &sTs, &sTt);  // (the current texture matrix's, not the recorded one)
+    for (int k = 0; k < sPrimN; k++) { sPrimVtx[k] = sReplay[e->endIdx[k]]; sPrimIdx[k] = NO_IDX; }
+    sFifoWords += e->words;
+}
+
+// Runs a list from the cache or records it; 0: not for the cache (decode it as usual).
+static int dl_run(const u32 *src, u32 words) {
+    if (!port_dl_cache || port_g3_prof || sTraceLeft || sFifoNCmd || words < DL_MIN_WORDS || words > 0xFFFF) return 0;
+    if (!sRecV) {
+        sRecV = malloc(sizeof(DlVtx) * REC_MAXV);
+        sRecE = malloc(sizeof(DlEmit) * REC_MAXE);
+        sReplay = malloc(sizeof(G3Vtx) * REC_MAXV);
+        if (!sRecV || !sRecE || !sReplay) { port_dl_cache = 0; return 0; }
+    }
+    gDlStats[5] += words;
+    u32 h = dl_hash(src, words);
+    if (sImpure[h & 255] == h) { gDlStats[2]++; return 0; }
+    vstate_save(&sCur);
+    DlEntry **bucket = &sDl[h & (DL_BUCKETS - 1)];
+    int variants = 0;
+    for (DlEntry *e = *bucket; e; e = e->next) {
+        if (e->hash != h || e->words != words) continue;
+        variants++;
+        if (memcmp(&e->start, &sCur, offsetof(VState, ts))) continue;
+        if ((e->reads & DL_READS_TS) && (e->start.ts != sCur.ts || e->start.tt != sCur.tt)) continue;
+        if ((e->reads & DL_READS_VEC) && memcmp(e->start.vec, sCur.vec, sizeof(Mtx))) continue;
+        if ((e->reads & DL_READS_TEX) && memcmp(e->start.tex, sCur.tex, sizeof(Mtx))) continue;
+        if (memcmp(e->data, src, words * 4)) continue;
+        dl_replay(e);
+        gDlStats[0]++;
+        gDlStats[4] += words;
+        return 1;
+    }
+    // first time with this state: run it, writing it down
+    sRecording = 1; sRecBad = sRecImpure = 0; sRecNV = sRecNE = 0;
+    sRecTsSet = sRecTsRead = sRecTexRead = sRecVecRead = 0;
+    for (int k = 0; k < 4; k++) sPrimIdx[k] = NO_IDX;  // (a primitive begun before the list: not in the record)
+    fifo_decode(src, words);
+    sRecording = 0;
+    if (sRecImpure) { sImpure[h & 255] = h; gDlStats[2]++; return 1; }
+    if (sRecBad || sFifoNCmd || variants >= DL_VARIANTS) { gDlStats[3]++; return 1; }
+    u16 endIdx[4] = { NO_IDX, NO_IDX, NO_IDX, NO_IDX };
+    for (int k = 0; k < sPrimN; k++) if ((endIdx[k] = sPrimIdx[k]) == NO_IDX) { gDlStats[3]++; return 1; }
+    u32 bytes = sizeof(DlEntry) + sRecNV * sizeof(DlVtx) + sRecNE * sizeof(DlEmit) + words * 4;
+    if (sDlBytes + bytes > DL_BUDGET) dl_flush();
+    DlEntry *e = malloc(bytes);
+    if (!e) { dl_flush(); gDlStats[3]++; return 1; }
+    e->hash = h; e->words = words; e->nv = sRecNV; e->ne = sRecNE; e->bytes = bytes;
+    e->reads = (sRecTsRead ? DL_READS_TS : 0) | (sRecVecRead ? DL_READS_VEC : 0) | (sRecTexRead ? DL_READS_TEX : 0) | (sRecTsSet ? DL_SETS_TS : 0);
+    e->start = sCur;
+    vstate_save(&e->end);
+    memcpy(e->endIdx, endIdx, sizeof(endIdx));
+    e->v = (DlVtx *)(e + 1);
+    e->e = (DlEmit *)(e->v + sRecNV);
+    e->data = (u32 *)(e->e + sRecNE);
+    memcpy(e->v, sRecV, sRecNV * sizeof(DlVtx));
+    memcpy(e->e, sRecE, sRecNE * sizeof(DlEmit));
+    memcpy(e->data, src, words * 4);
+    e->next = *bucket;
+    *bucket = e;
+    sDlBytes += bytes;
+    gDlStats[1]++;
+    return 1;
+}
+
+uint64_t gG3Ticks;  // (profiling: CPU time in the geometry engine, display lists and register writes)
+uint64_t port_ctr_ticks(void);
+static void fifo_send_impl(const u32 *src, u32 words) {
+    uint64_t t = port_ctr_ticks();
+    if (!dl_run(src, words)) fifo_decode(src, words);
     gG3Ticks += port_ctr_ticks() - t;
 }
 

@@ -157,6 +157,9 @@ void port_frame(void) {
         { extern uint32_t gG3Sends; port_log("  geometry engine %lu us per frame (part of the game code), %lu sends\n", (unsigned long)(gG3Ticks / 600 / 268), (unsigned long)(gG3Sends / 600)); gG3Sends = 0;
           extern uint64_t gG3QueueWait; port_log("  game waiting for the geometry engine's core %lu us per frame\n", (unsigned long)(gG3QueueWait / 600 / 268)); gG3QueueWait = 0;
           extern uint32_t gG3Syncs[8]; port_log("  syncs per frame x100: clip %lu vec %lu box %lu pos %lu vtest %lu levels %lu\n", (unsigned long)(gG3Syncs[0] / 6), (unsigned long)(gG3Syncs[1] / 6), (unsigned long)(gG3Syncs[2] / 6), (unsigned long)(gG3Syncs[3] / 6), (unsigned long)(gG3Syncs[4] / 6), (unsigned long)(gG3Syncs[5] / 6)); memset(gG3Syncs, 0, sizeof(gG3Syncs)); }
+        { extern uint32_t gDlStats[6]; port_log("  display-list cache per frame: %lu hits, %lu recorded, %lu impure, %lu other; %lu%% of the list words replayed\n",
+              (unsigned long)(gDlStats[0] / 600), (unsigned long)(gDlStats[1] / 600), (unsigned long)(gDlStats[2] / 600), (unsigned long)(gDlStats[3] / 600),
+              (unsigned long)(gDlStats[5] ? (uint64_t)gDlStats[4] * 100 / gDlStats[5] : 0)); memset(gDlStats, 0, sizeof(gDlStats)); }
         gG3Ticks = 0;
         extern uint64_t gRenderWaitTicks;
         port_log("  waiting for the render core %lu us per frame\n", (unsigned long)(gRenderWaitTicks / 600 / 268));
