@@ -245,6 +245,7 @@ history so far, for example:
 | **T12d** | Cheat codes in unmapped regions | M | 1–2 h | — |
 | **T13** | Docs: fold HANDOFF.md's open items into this file | S | 15–30 min | — |
 | **T14** | ~~Bottom screen's blended layers drawn solid~~ fixed in Azahar; check on hardware | S | ~5 min (your time at the 3DS) | — |
+| **T15** | Stereoscopic 3D speed: revisit once T3 is done (no interim fixes) | — | — | T3c |
 
 **Quick wins (under an hour each):** T2, T4a, T4c, T4f, T7a, T7c, T12a, T12c, T13, and T1 if
 the state diff finds the bug quickly.
@@ -265,6 +266,7 @@ The other 3D tasks relate to it like this:
 | **T3a** caching | **The first step of T3.** Cheap and proven: pspoke, a PSP port of the same game, cut outdoor 3D from 19 to 5 ms this way. Its lessons about which state repeats carry into T3b. |
 | **T4a–h** effects | **Needed either way.** They're drawing features, so whichever path feeds the GPU needs them. Fog and toon shading become shader work in T3. Shadow polygons stay stencil tricks in both paths. Doing them now isn't wasted. |
 | **T5** direct writes | **Why the old engine stays.** This assembly sends raw 3D commands past the 3D library, so T3 never sees it. Overlay 41 and two helper functions keep needing the emulated engine. |
+| **T15** stereo speed | **Waits for T3.** Stereo draws the 3D layer twice: command building, edge-marking passes and hole fill all run per eye, and the top screen is composed again for the right eye. Native 3D fixes this the way 3DS games do: commands built once and replayed per eye with a per-eye camera from the game's own projection. So no interim per-eye tuning; T15 picks up what's left after T3c. |
 
 **A constraint for every 3D path.** The game reads some results back from the DS's 3D hardware,
 such as the clip matrix and position and box tests, and expects exact DS fixed-point answers. A
@@ -384,6 +386,18 @@ native path still has to compute those on the CPU, even when the GPU does the dr
 - **Fix:** the bottom screen is always composed in `sDsTarget`, then copied at 1x or 1.25x.
   Azahar's GPU-vs-software check now reads 0 differing bottom pixels at 1:1 in battle.
 - **Left:** look at the battle menu on hardware at 1:1 and at fill.
+
+**T15: Stereoscopic 3D speed (revisit after T3)**
+- **Symptom:** with the 3D slider up, the frame rate drops a long way on hardware.
+- **Cause:** the geometry engine runs once, but the render thread and the GPU do everything per
+  eye: the 3D layer's command building, its colour, hole-fill, ID and edge passes, and the whole
+  top screen's composition (2D included) again for the right eye (`render3d`, `gpu2d.c`). On a
+  New 3DS the render thread also shares core 2 with the geometry worker (T1), which runs above it.
+- **Decision (2026-11-15):** no interim fixes. Native 3D (T3) makes the second eye a replay with
+  another camera, as 3DS games do, and gives stereo the game's real camera instead of the
+  per-frame depth normalisation. Revisit once T3c is done. Still worth checking then: reusing the
+  left eye's 2D for the right eye (the compositor, which T3 doesn't change), and edge marking for
+  two eyes.
 
 ---
 
