@@ -244,6 +244,7 @@ history so far, for example:
 | **T12c** | `.3dsx` build | S | 30–60 min | — |
 | **T12d** | Cheat codes in unmapped regions | M | 1–2 h | — |
 | **T13** | Docs: fold HANDOFF.md's open items into this file | S | 15–30 min | — |
+| **T14** | ~~Bottom screen's blended layers drawn solid~~ fixed in Azahar; check on hardware | S | ~5 min (your time at the 3DS) | — |
 
 **Quick wins (under an hour each):** T2, T4a, T4c, T4f, T7a, T7c, T12a, T12c, T13, and T1 if
 the state diff finds the bug quickly.
@@ -373,6 +374,16 @@ native path still has to compute those on the CPU, even when the GPU does the dr
 **T13: Docs**
 - Fold the still-valid parts of HANDOFF.md's "Open items" into this file and mark the rest as
   history.
+
+**T14: Bottom screen's blended layers drawn solid (fixed; check on hardware)**
+- **Was:** in battle, the move panels behind FIGHT (alpha-blended into the background on the DS)
+  came out solid, in Azahar and on hardware, whatever the display options.
+- **Cause:** blending and windows mark pixels in the stencil buffer, and the bottom screen's
+  target (`sBottom`) has none. At 1:1 the layers were drawn straight onto it. Only the 1.25x path
+  went through the DS-size intermediate (`sDsTarget`), which has a stencil.
+- **Fix:** the bottom screen is always composed in `sDsTarget`, then copied at 1x or 1.25x.
+  Azahar's GPU-vs-software check now reads 0 differing bottom pixels at 1:1 in battle.
+- **Left:** look at the battle menu on hardware at 1:1 and at fill.
 
 ---
 

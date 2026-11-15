@@ -691,14 +691,18 @@ static void extend_full_rows(Plane *p, int hofs, int vofs) {
     scissor_ds(0);
 }
 
+static float s3dL, s3dT;  // the layout's left and top when the 3D layer was rendered (render3d)
 static void bg_quads(void *arg) {
     BgDraw *d = arg;
     const Eng *e = d->e;
     if (d->kind == 3) {  // the 3D layer: rendered on the DS's pixel grid over the whole screen (render3d)
         // (scaled up here like every other layer: at 1.25x its pixels stay even, as the 2D's do)
         C3D_TexBind(0, port_edge_mode >= 2 && sIdTarget ? sIdCur : s3dCur);
+        // (texel x is DS x - s3dL, as render3d laid it out for the whole screen; composed into the
+        // DS-size target (the bottom screen), sL is 0 and the image starts -s3dL texels in)
+        float u0 = (sL - s3dL) / 512.0f, v0 = (sT - s3dT) / 256.0f;
         if (sWide) scissor_ds(1);
-        quad(sL, sT, sL + sW, sT + sH, 0, 0, sW / 512.0f, sH / 256.0f);
+        quad(sL, sT, sL + sW, sT + sH, u0, v0, u0 + sW / 512.0f, v0 + sH / 256.0f);
         if (sWide) scissor_ds(0);
         if (sMargins) {  // (its edge columns)
             float uL = (0 - sL + 0.5f) / 512, uR = (256 - sL - 0.5f) / 512;
@@ -902,10 +906,13 @@ static void layout_ds(void) {
     sW = 256; sH = 192; sL = 0; sT = 0;
 }
 
-// The bottom screen at 1.25x: its layers are composed once at the DS's size into this target
-// (256x256, rotated like the screens: 192 rows used), then drawn onto the screen in one pass,
-// 2.5x nearest into the 2x target that the display transfer box-filters: the picture of
-// composing every layer at 2.5x, for a sixth of the GPU's pixels (the GPU was the 3DS's limit).
+// The bottom screen, at either scale: its layers are composed once at the DS's size into this
+// target (256x256, rotated like the screens: 192 rows used), then drawn onto the screen in one
+// pass: 1x nearest at 1:1 (exact pixels), or at 1.25x 2.5x nearest into the 2x target that the
+// display transfer box-filters: the picture of composing every layer at 2.5x, for a sixth of the
+// GPU's pixels (the GPU was the 3DS's limit). It is also the bottom's only depth-stencil buffer
+// (sBottom has none): blending and windows need the stencil, so composing straight onto sBottom
+// drew blended layers wrong (the battle menu's faded move panels came out solid).
 static C3D_Tex sDsTex;
 static C3D_RenderTarget *sDsTarget;
 static int sDsPass;  // (render_engine is drawing into the DS-size target)
@@ -914,7 +921,11 @@ static void render_engine_layers(Eng *e, C3D_RenderTarget *t, int screenW) {
     int ei = !e->main;
     e->dispcnt = rd32(e->io);
     layout(screenW);
-    sDsPass = screenW == 320 && sScale > 1.0f && sDsTarget;
+    sDsPass = screenW == 320 && sDsTarget;
+    if (screenW == 320 && !sDsTarget) {
+        static int warned;
+        if (!warned) { warned = 1; port_log("gpu: no DS-size target: the bottom screen has no stencil (blending and windows wrong)\n"); }
+    }
     if (sDsPass) {
         C3D_FrameDrawOn(sDsTarget);
         C3D_SetViewport(0, 0, 192, 256);
@@ -2316,6 +2327,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
 static void render3d(int screenW) {
     const G3Frame *f = port_g3_frame();
     layout(screenW);
+    s3dL = sL; s3dT = sT;
     sWide = 0;
     if (!f || !s3dReady) return;
     { u64 t = svcGetSystemTick(); sWide = wide_stable(want_wide(f, screenW)); gProf3dWide += svcGetSystemTick() - t; }
