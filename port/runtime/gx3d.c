@@ -649,7 +649,10 @@ static void port_cmd_impl(u32 off, u32 value) {
 #define REC_PORT   0x02000000u  // | offset: a command port write, its value follows
 #define REC_VBLANK 0x03000000u  // swap register, viewport register follow
 #define REC_PAD    0x0F000000u  // the rest of the ring unused
-int port_g3_thread = 1;  // (debug.txt "g3thread N": 0 on the game's thread, 1 core 2 above the render thread, 2 below it)
+// Where the engine runs: 0 on the game's thread, 1 core 2 above the render thread, 2 below it.
+// debug.txt "g3thread N" sets it; otherwise the menu's "3D engine" row (settings.txt "geometry"),
+// read at start, so a change there applies from the next start.
+int port_g3_thread = -1;
 static int sWorker;                    // (the worker is running)
 static u32 *sRing;
 static volatile u32 sHead, sTail;      // (words written by the game / consumed by the worker, ever)
@@ -699,6 +702,7 @@ static void wait_worker(u32 maxPending) {
     gG3QueueWait += port_ctr_ticks() - t0;
 }
 static void g3_sync(void) { if (sWorker) wait_worker(0); }
+int port_g3_running(void) { return sWorker ? port_g3_thread : 0; }  // (for the menu)
 
 // One record: a header and fixed words, then (FIFO) `n` words from `data`.
 static void enqueue(const u32 *rec, u32 nrec, const u32 *data, u32 n) {
@@ -721,7 +725,9 @@ static void enqueue(const u32 *rec, u32 nrec, const u32 *data, u32 n) {
 }
 
 static void worker_start(void) {
-    if (!port_g3_thread) return;
+    extern int port_g3_setting;
+    if (port_g3_thread < 0) port_g3_thread = port_g3_setting;
+    if (!port_g3_thread) { port_log("geometry engine: on the game's thread\n"); return; }
     sRing = malloc(RING_WORDS * 4);
     sWorkEvent = port_event_new();
     sProgressEvent = port_event_new();

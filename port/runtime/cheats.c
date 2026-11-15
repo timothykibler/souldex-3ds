@@ -156,17 +156,20 @@ static int load_db(const char *path) {
 
 // ---------------------------------------------------------------- display settings
 extern int port_display_fill, port_side_fill, port_stereo_enabled, port_seam_fill, port_wide_mode, port_hud_on;
+int port_g3_setting = 1;  // (the 3D engine's place from the next start: port_g3_thread in gx3d.c)
+static const char *const sG3Names[3] = { "game", "core2", "core2-low" };
 static void save_settings(void) {
     FILE *f = fopen(PORT_DIR "/settings.txt", "w");
     if (!f) return;
     fprintf(f, "version 3\nhud %s\n", port_hud_on ? "on" : "off");
     fprintf(f, "screen %s\nsides %s\n3d %s\nseams %s\nwide %s\n", port_display_fill ? "fill" : "1:1", port_side_fill ? "continue" : "black", port_stereo_enabled ? "on" : "off", port_seam_fill ? "filled" : "off", port_wide_mode ? "on" : "off");
+    fprintf(f, "geometry %s\n", sG3Names[port_g3_setting]);
     fclose(f);
 }
 static void load_settings(void) {
     FILE *f = fopen(PORT_DIR "/settings.txt", "r");
     if (!f) return;
-    char line[64];
+    char line[64], word[16];
     // (settings from before version 3 are dropped: the defaults changed (1:1, widened 3D, no seam
     // fill; the cracks the seam fill hid are closed by rounding vertices now) and the old file
     // would keep the old ones)
@@ -184,6 +187,8 @@ static void load_settings(void) {
         else if (!strncmp(line, "seams off", 9)) port_seam_fill = 0;
         else if (!strncmp(line, "wide on", 7)) { if (!port_wide_mode) port_wide_mode = 1; }
         else if (!strncmp(line, "wide off", 8)) port_wide_mode = 0;
+        else if (sscanf(line, "geometry %15s", word) == 1)
+            for (int i = 0; i < 3; i++) if (!strcmp(word, sG3Names[i])) port_g3_setting = i;
     }
     fclose(f);
 }
@@ -327,7 +332,7 @@ typedef struct { int folder, cheat; } Row;
 static Row *sRows;
 static int sNumRows;
 
-#define NUM_SETTINGS 7
+#define NUM_SETTINGS 8
 static void build_rows(void) {
     if (!sRows) sRows = malloc(sizeof(Row) * (size_t)(sNumCheats + sNumFolders + NUM_SETTINGS + 1));
     sNumRows = 0;
@@ -340,6 +345,8 @@ static void build_rows(void) {
         if (fo < 0 || sFolders[fo].open) sRows[sNumRows++] = (Row){ fo, i };
     }
 }
+
+static int is_new3ds(void) { bool n = false; APT_CheckNew3DS(&n); return n; }
 
 static void draw_menu(int cur, int top) {
     printf("\x1b[1;1H\x1b[2J");
@@ -355,7 +362,13 @@ static void draw_menu(int cur, int top) {
             else if (w->cheat == 3) printf("%s 3D seams: %s\x1b[0m\n", mark, port_seam_fill ? "filled (as the DS)" : "off (faster)");
             else if (w->cheat == 4) printf("%s Widescreen 3D: %s\x1b[0m\n", mark, port_wide_mode ? "on" : "off (DS picture only)");
             else if (w->cheat == 5) printf("%s Frame counter: %s\x1b[0m\n", mark, port_hud_on ? "on" : "off");
-            else { extern int port_double_speed; printf("%s Speed: %s\x1b[0m\n", mark, port_double_speed ? "double (60 fps, as unlocked)" : "normal (30 fps, as the DS)"); }
+            else if (w->cheat == 6) { extern int port_double_speed; printf("%s Speed: %s\x1b[0m\n", mark, port_double_speed ? "double (60 fps, as unlocked)" : "normal (30 fps, as the DS)"); }
+            else if (!is_new3ds()) printf("%s 3D engine: game thread (New 3DS: core 2)\x1b[0m\n", mark);
+            else {
+                static const char *const label[3] = { "game thread", "core 2", "core 2, low prio" };
+                int port_g3_running(void);
+                printf("%s 3D engine: %s%s\x1b[0m\n", mark, label[port_g3_setting], port_g3_setting != port_g3_running() ? " (restart)" : "");
+            }
             continue;
         }
         if (w->cheat < 0) printf("%s%s %.34s\x1b[0m\n", mark, sFolders[w->folder].open ? "-" : "+", sFolders[w->folder].name);
@@ -418,7 +431,7 @@ static void menu(void) {
         if ((down & KEY_A) && sNumRows) {
             Row w = sRows[cur];
             if (w.folder == -2) {
-                if (w.cheat == 0) port_display_fill ^= 1; else if (w.cheat == 1) port_side_fill ^= 1; else if (w.cheat == 2) port_stereo_enabled ^= 1; else if (w.cheat == 3) port_seam_fill ^= 1; else if (w.cheat == 4) port_wide_mode = !port_wide_mode; else if (w.cheat == 5) port_hud_on ^= 1; else { extern int port_double_speed; port_double_speed ^= 1; }
+                if (w.cheat == 0) port_display_fill ^= 1; else if (w.cheat == 1) port_side_fill ^= 1; else if (w.cheat == 2) port_stereo_enabled ^= 1; else if (w.cheat == 3) port_seam_fill ^= 1; else if (w.cheat == 4) port_wide_mode = !port_wide_mode; else if (w.cheat == 5) port_hud_on ^= 1; else if (w.cheat == 6) { extern int port_double_speed; port_double_speed ^= 1; } else if (is_new3ds()) port_g3_setting = port_g3_setting == 1 ? 2 : port_g3_setting == 2 ? 0 : 1;
                 save_settings();
             } else if (w.cheat < 0) {
                 sFolders[w.folder].open ^= 1;
