@@ -11,6 +11,8 @@
 *.cia
 *.3dsx
 *.elf
+# A personal build's own CIA settings (port/package.sh uses it over port/cia.rsf)
+/port/cia.local.rsf
 /*.nosync/
 # Screenshots of the game (made from the ROM)
 /captures/

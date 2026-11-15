@@ -31,7 +31,9 @@ docker run --rm -v "$PWD":/w "${ROMARG[@]}" -w /w/build-3ds ss3ds-cia sh -c '
     bannertool makebanner -ci art/banner.cgfx -a /w/port/silence.wav -o soulsilver.bnr >/dev/null
   fi
   arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf 2>/dev/null || /opt/devkitpro/devkitARM/bin/arm-none-eabi-strip -o soulsilver-stripped.elf soulsilver.elf
-  makerom -f cia -o soulsilver.cia -rsf /w/port/cia.rsf -target t -exefslogo -elf soulsilver-stripped.elf -icon soulsilver.smdh -banner soulsilver.bnr
+  RSF=/w/port/cia.rsf  # (port/cia.local.rsf instead, if present: a personal build'"'"'s own settings, git-ignored)
+  if [ -f /w/port/cia.local.rsf ]; then RSF=/w/port/cia.local.rsf; echo "package: using port/cia.local.rsf"; fi
+  makerom -f cia -o soulsilver.cia -rsf "$RSF" -target t -exefslogo -elf soulsilver-stripped.elf -icon soulsilver.smdh -banner soulsilver.bnr
 '
 # (the ELF kept under the build's ID, which the game logs at start-up: crash dumps resolve against it)
 if [ -f build-3ds/gen/build_id.txt ]; then
