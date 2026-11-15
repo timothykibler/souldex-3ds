@@ -211,7 +211,7 @@ history so far, for example:
 
 | ID | Task | Size | Claude time | Depends on |
 |---|---|---|---|---|
-| **T1** | Fix the New 3DS geometry worker's sprite bug | S–M | 30–90 min | — |
+| **T1** | ~~Fix the New 3DS geometry worker's sprite bug~~ done (on by default; `g3thread 0` turns it off) | — | — | — |
 | **T2** | Measure speed on both 3DS models | S | ~15 min (plus your time at the 3DS) | T1 helps but isn't required |
 | **T3a** | 3D display-list caching | M | 2–4 h | — |
 | **T3b** | Native 3D prototype: the map drawn through the game's 3D library | L ⚠ | 4–8 h | — (T3a's findings help) |
