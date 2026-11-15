@@ -76,6 +76,7 @@ static int sWide;             // this frame's 3D layer is widened
 static int sMargins;          // the top screen's sides continue the DS picture's edge columns (not widened)
 static int sExtend;           // this engine's 3D is widened: full-width 2D rows (a wipe's bars) and windows reaching the edges go on to the screen's
 static C3D_Tex sShade;        // (the sides' darkening: alpha rising outwards)
+static C3D_Tex sGlow;         // (the border's glow: 64x64 over the whole screen, brightest at the middle)
 static void scissor_ds(int whole);
 static void layout(int screenW);
 
@@ -1081,6 +1082,54 @@ static void render_engine(Eng *e, C3D_RenderTarget *t, int screenW) {
     if (sDsPass) { ds_final(t, screenW); sDsPass = 0; }
 }
 
+// ---------------------------------------------------------------- the border
+// At 1:1 the bottom screen's DS picture sits in a black border; a soft glow of one colour behind
+// it, fading to black at the screen's edges, fills it without inventing picture. (Bottom screen
+// only.) debug.txt "border N" picks a colour (0: plain black).
+int port_border = 3;  // (night blue)
+static void draw_border(C3D_RenderTarget *t, int screenW, int filled, u16 backdrop) {
+    if (!port_border || !sGlow.data || filled) return;
+    layout(screenW);
+    if (sW <= 256.5f && sH <= 192.5f) return;  // (no border: the picture fills the screen)
+    u32 c;
+    switch (port_border) {
+    case 2: c = 0xFFE0D4C8u; break;  // silver (0xAABBGGRR)
+    case 3: c = 0xFFA06030u; break;  // night blue
+    default: c = 0xFFD0A880u; break;  // silver-blue
+    }
+    C3D_FrameDrawOn(t);
+    C3D_Mtx proj;
+    Mtx_OrthoTilt(&proj, sL, sL + sW, sT + sH, sT, -1, 1, true);
+    C3D_FVUnifMtx4x4(GPU_VERTEX_SHADER, sProjLoc, &proj);
+    sOX = sOY = 0;
+    scissor_ds(1);
+    C3D_DepthTest(true, GPU_ALWAYS, GPU_WRITE_COLOR);
+    C3D_StencilTest(false, GPU_ALWAYS, 0, 0, 0);
+    C3D_AlphaTest(false, GPU_ALWAYS, 0);
+    C3D_TexEnv *env = C3D_GetTexEnv(0);
+    C3D_TexEnvInit(env);
+    C3D_TexEnvSrc(env, C3D_RGB, GPU_CONSTANT, 0, 0);
+    C3D_TexEnvFunc(env, C3D_RGB, GPU_REPLACE);
+    C3D_TexEnvSrc(env, C3D_Alpha, GPU_TEXTURE0, 0, 0);
+    C3D_TexEnvFunc(env, C3D_Alpha, GPU_REPLACE);
+    C3D_TexEnvColor(env, c);
+    C3D_TexEnvInit(C3D_GetTexEnv(1));
+    C3D_AlphaBlend(GPU_BLEND_ADD, GPU_BLEND_ADD, GPU_SRC_ALPHA, GPU_ONE_MINUS_SRC_ALPHA, GPU_ZERO, GPU_ONE);
+    C3D_TexBind(0, &sGlow);
+    // (a 3x3 grid around the picture, the middle left out: u and v run from 0 at the screen's edge
+    // to 1 at the picture's, and stay 1 along it; the mask is the product of the two)
+    (void)backdrop;
+    const float xs[4] = { sL, 0, 256, sL + sW }, ys[4] = { sT, 0, 192, sT + sH };
+    const float us[3][2] = { { 0, 1 }, { 1, 1 }, { 1, 0 } };
+    for (int j = 0; j < 3; j++)
+        for (int i = 0; i < 3; i++) {
+            if ((i == 1 && j == 1) || xs[i + 1] - xs[i] < 0.5f || ys[j + 1] - ys[j] < 0.5f) continue;
+            quad(xs[i], ys[j], xs[i + 1], ys[j + 1], us[i][0] * 0.98f + 0.01f, us[j][0] * 0.98f + 0.01f, us[i][1] * 0.98f + 0.01f, us[j][1] * 0.98f + 0.01f);
+        }
+    blend_off();
+    scissor_ds(0);
+}
+
 // ---------------------------------------------------------------- the frame counter
 // Top-left of the top screen (in the black border at 1:1): the game's frames per second, the
 // GPU's drawing time per frame, the game code's (CPU core 1) and the render core's (2D and 3D
@@ -1232,6 +1281,20 @@ bool port_gpu2d_init(void) {
             for (int x = 0; x < 64; x++) *tex_px(sShade.data, 64, 8, x, y) = (u16)((x * x * 10 + 63 * 63 / 2) / (63 * 63));
         C3D_TexFlush(&sShade);
     }
+    if (C3D_TexInit(&sGlow, 64, 64, GPU_LA8)) {  // (L = A: only the alpha is used)
+        C3D_TexSetFilter(&sGlow, GPU_LINEAR, GPU_LINEAR);
+        C3D_TexSetWrap(&sGlow, GPU_CLAMP_TO_EDGE, GPU_CLAMP_TO_EDGE);
+        for (int y = 0; y < 64; y++)
+            for (int x = 0; x < 64; x++) {
+                // (u, v: 0 at the screen's edge, 1 at the picture's (draw_border); each eased,
+                // multiplied: at most about 60 %, against the picture)
+                float u = x / 63.0f, v = y / 63.0f;
+                float fu = u * u * (3 - 2 * u), fv = v * v * (3 - 2 * v);
+                int a = (int)(fu * fv * 155 + 0.5f);
+                *tex_px(sGlow.data, 64, 64, x, y) = (u16)(a << 8 | a);
+            }
+        C3D_TexFlush(&sGlow);
+    }
     port_log("gpu: VRAM free %lu\n", (unsigned long)vramSpaceFree());
     port_log("gpu: ready\n");
     sReady = true;
@@ -1307,6 +1370,7 @@ void port_gpu2d_frame(void) {
         render_engine(&a, sTopR, 400);
         s3dCur = &s3dTex; sIdCur = &sIdTex; sRepeat = 0;
     }
+    draw_border(sBottom, 320, 0, 0);  // (the bottom screen's border at 1:1; the top's stays black)
     if (port_hud_on) {
         draw_hud(sTop);
         if (sStereo && sTopR) draw_hud(sTopR);
