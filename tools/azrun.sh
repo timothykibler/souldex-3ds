@@ -15,8 +15,9 @@ pkill -9 -f "MacOS/azahar" 2>/dev/null || true
 sleep 1
 cat > "$SD/debug.txt"
 rm -f "$SD"/shot_*.bmp "$SD"/full_*.bmp
-for k in check_for_update_on_start=false firstStart=false confirmClose=false use_gdbstub=false; do
-  key=${k%%=*}; sed -i '' "s/^$key=.*/$k/" "$CFG"
+# (instant_debug_log: written as it happens; buffered, the log lost its end, unmapped accesses too)
+for k in check_for_update_on_start=false firstStart=false confirmClose=false use_gdbstub=false instant_debug_log=true "log_filter=*:Info Debug.Emulated:Debug"; do
+  key=${k%%=*}; sed -i '' "s/^$key=.*/$k/; s/^$key\\\\default=.*/$key\\\\default=false/" "$CFG"
 done
 TMP=$(mktemp -d)/game.elf
 cp "$ROOT/build-3ds/soulsilver.elf" "$TMP"
@@ -40,6 +41,9 @@ if [ -n "$CRASH" ]; then
   echo "azrun: last game log lines:"; tail -4 "$SD/log.txt" | sed 's/^/  /'
 fi
 sleep 2
+# (quit, not kill: Azahar buffers its log, and -9 loses the end of it: unmapped accesses too)
+osascript -e "tell application id \"$(defaults read "$AZAHAR/Contents/Info" CFBundleIdentifier)\" to quit" >/dev/null 2>&1 || pkill -TERM -f "MacOS/azahar" 2>/dev/null || true
+for i in 1 2 3 4 5 6 7 8 9 10; do pgrep -f "MacOS/azahar" >/dev/null || break; sleep 0.5; done
 pkill -9 -f "MacOS/azahar" 2>/dev/null || true
 OUT="$ROOT/captures/run"; rm -rf "$OUT"; mkdir -p "$OUT"
 for f in "$SD"/shot_*.bmp "$SD"/full_*.bmp; do [ -f "$f" ] && sips -s format png "$f" --out "$OUT/$(basename "${f%.bmp}").png" >/dev/null; done

@@ -115,6 +115,11 @@ Classes found and fixed so far:
   Then `find -L build-3ds -name "* [0-9].*" -delete` (iCloud conflict copies, see below).
 - **CIA**: `port/package.sh` (builds the `ss3ds-cia` image from `docker/cia/Dockerfile` the first
   time: devkitARM + makerom + bannertool, the latter compiled from source).
+- **Map tour**: `AZAHAR=... tools/maptour.py [--start MAP] [--count N]` warps through every map
+  (479, about 40 min; 40 per Azahar run) and writes each map's unmapped accesses and crashes to
+  `captures/maptour.txt`. debug.txt takes any number of `warp` lines; `warpmark` tags each in
+  Azahar's log. Azahar doesn't log every unmapped access (a null-page read in port code went
+  unlogged), so a clean map is a good sign, not proof.
 - **One-shot test runs**: `AZAHAR=/path/Azahar.app tools/azrun.sh <frame> [timeout] < debug-lines`
   (writes debug.txt, launches, waits for the capture, kills Azahar, converts to `captures/run/`,
   prints the log). Captures are `shot_N` (DS resolution, + software renderer at N+1) and `full_N`

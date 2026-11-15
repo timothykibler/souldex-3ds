@@ -70,9 +70,14 @@ static void setup_system_area(void) {
 extern void NitroMain(void);
 extern void port_run_main_sinit(void);
 
-// debug.txt "warp FRAME MAP X Z": at that frame, the game's own warp (as a script's) to there,
+// debug.txt "warp FRAME MAP X Z" (any number of them, in frame order): from that frame, once the
+// field runs no task (a map's entry script, a fade), the game's own warp (as a script's) to there,
 // facing north, for testing a place without walking to it. (The field system kept from Continue.)
-int port_warp_frame = -1, port_warp_map, port_warp_x, port_warp_z;
+// "warpmark": each warp also prints "maptour: map MAP" to the debugger, so Azahar's log marks where
+// each map starts among its unmapped accesses (tools/maptour.py).
+typedef struct { int frame, map, x, z; } Warp;
+static Warp sWarps[640];
+static int sNumWarps, sNextWarp, sWarpMark;
 static void *sFieldSystem;
 void *__real_CallFieldTask_ContinueGame_Normal(void *fieldSystem);
 void *__wrap_CallFieldTask_ContinueGame_Normal(void *fieldSystem) {
@@ -80,10 +85,19 @@ void *__wrap_CallFieldTask_ContinueGame_Normal(void *fieldSystem) {
     return __real_CallFieldTask_ContinueGame_Normal(fieldSystem);
 }
 void *sub_020538C0(void *fieldSystem, u32 mapId, int warpId, int x, int y, int direction);
+int FieldSystem_TaskIsRunning(void *fieldSystem);
 void port_debug_warp_frame(void) {
-    if (port_warp_frame < 0 || port_frame_count != (u32)port_warp_frame || !sFieldSystem) return;
-    port_log("warp: map %d (%d, %d)\n", port_warp_map, port_warp_x, port_warp_z);
-    sub_020538C0(sFieldSystem, (u32)port_warp_map, -1, port_warp_x, port_warp_z, 0);
+    if (sNextWarp >= sNumWarps || !sFieldSystem) return;
+    const Warp *w = &sWarps[sNextWarp];
+    if (port_frame_count < (u32)w->frame || FieldSystem_TaskIsRunning(sFieldSystem)) return;
+    sNextWarp++;
+    port_log("warp: map %d (%d, %d) at frame %u%s\n", w->map, w->x, w->z, (unsigned)port_frame_count, sWarpMark ? ", marked" : "");
+    if (sWarpMark) {
+        char mark[32];
+        int len = snprintf(mark, sizeof(mark), "maptour: map %d", w->map);
+        svcOutputDebugString(mark, len);
+    }
+    sub_020538C0(sFieldSystem, (u32)w->map, -1, w->x, w->z, 0);
 }
 
 int main(void) {
@@ -144,7 +158,8 @@ int main(void) {
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
             else if (sscanf(line, "snap %u", &n) == 1) { extern int port_g3_snap; port_g3_snap = (int)n; }
             else if (sscanf(line, "holes %u", &n) == 1) { extern int port_hole_fill; port_hole_fill = (int)n; }
-            else if (sscanf(line, "warp %u %u %u %u", &n, &m, &per, &q) == 4) { port_warp_frame = (int)n; port_warp_map = (int)m; port_warp_x = (int)per; port_warp_z = (int)q; }
+            else if (sscanf(line, "warp %u %u %u %u", &n, &m, &per, &q) == 4) { if (sNumWarps < (int)(sizeof(sWarps) / sizeof(sWarps[0]))) sWarps[sNumWarps++] = (Warp){ (int)n, (int)m, (int)per, (int)q }; }
+            else if (!strncmp(line, "warpmark", 8)) sWarpMark = 1;
             else if (sscanf(line, "double %u", &n) == 1) { extern int port_double_speed; port_double_speed = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
