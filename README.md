@@ -6,6 +6,11 @@ ARM11 runs as it is) compiled with devkitARM GCC, on a runtime that stands in fo
 and the parts of Nintendo's SDK that drove it. The game's files are read from your own ROM. It is
 not an emulator: the game runs as a 3DS program.
 
+> **Use at your own risk.** This is an unfinished fan project. It writes to your save file, and it
+> can crash, freeze or corrupt a save. Back up your `.sav` before you copy it over, and keep backing
+> it up. It needs a 3DS that runs homebrew; modding a console is your own decision and your own
+> responsibility. No warranty, and no liability for lost saves or anything else (see [LICENSE](LICENSE)).
+
 **New here? See [GETTING_STARTED.md](GETTING_STARTED.md)** to build, install and play.
 **[PROJECT_STATUS.md](PROJECT_STATUS.md)** covers what's done, what runs natively and what is still
 emulated, and the next tasks.

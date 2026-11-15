@@ -37,7 +37,7 @@ Make the folder `sd:/3ds/soulsilver-3ds/` and copy into it:
 | File | What it is |
 |---|---|
 | `soulsilver.nds` | Your ROM (required: the game reads its graphics, maps, music and text from it). |
-| `soulsilver.sav` | Optional: your existing save, in the raw `.sav` format that flashcards and TWiLight Menu++ use. Without one, the game starts fresh. |
+| `soulsilver.sav` | Optional: your existing save, in the raw `.sav` format that flashcards and TWiLight Menu++ use. Without one, the game starts fresh. **Copy it, don't move it: keep the original as a backup.** |
 | `usrcheat.dat` | Optional: a cheat database in the R4 / TWiLight Menu++ format, for the cheat menu. |
 
 **Sound** needs the 3DS's DSP firmware at `sd:/3ds/dspfirm.cdc`. If you've ever played homebrew
