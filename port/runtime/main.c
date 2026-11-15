@@ -145,6 +145,7 @@ int main(void) {
             else if (sscanf(line, "snap %u", &n) == 1) { extern int port_g3_snap; port_g3_snap = (int)n; }
             else if (sscanf(line, "holes %u", &n) == 1) { extern int port_hole_fill; port_hole_fill = (int)n; }
             else if (sscanf(line, "warp %u %u %u %u", &n, &m, &per, &q) == 4) { port_warp_frame = (int)n; port_warp_map = (int)m; port_warp_x = (int)per; port_warp_z = (int)q; }
+            else if (sscanf(line, "g3thread %u", &n) == 1) { extern int port_g3_thread; port_g3_thread = (int)n; }
             else if (sscanf(line, "double %u", &n) == 1) { extern int port_double_speed; port_double_speed = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }
