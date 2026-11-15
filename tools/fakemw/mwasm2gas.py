@@ -121,6 +121,7 @@ def convert(text, move_ds_addresses=False, phase=None):
         _move_io_base_immediates(lines)
         _move_mem_immediates(lines)
         _move_derived_immediates(lines)
+        _shifted_io_literals(lines)
     return "\n".join(lines) + "\n"
 
 
@@ -194,9 +195,9 @@ def _move_derived_immediates(lines):
         if m and m.group(1) != m.group(2):
             dst, src, sh = m.group(1), m.group(2), int(m.group(3), 0)
             value = None
-            for k in range(1, 7):
-                if i - k < 0:
-                    break
+            for k in range(1, 15):
+                if i - k < 0 or re.match(r"\s*(\w+:|blx?\s|bx\s|b\s|pop\b)", lines[i - k]):
+                    break  # (a label, call or return between: not this mov's value)
                 mm = _MOV_IMM.match(lines[i - k])
                 if mm and mm.group(2) == src:
                     value = int(mm.group(4), 0) << sh
@@ -230,6 +231,50 @@ def _move_derived_immediates(lines):
                         new = f"{ind}mov {dst}, #{hex(imm)}\n{ind}lsl {dst}, {dst}, #{hex(s2)}"
         out.append(new if new else l)
     lines[:] = out
+
+
+_LSR_IMM = re.compile(r"^(\s*)lsrs?\s+(r\d),\s*(r\d),\s*#(0x[0-9a-fA-F]+|\d+)\s*$")
+_LDR_LABEL = re.compile(r"^\s*ldr\s+(r\d),\s*(\w+)\s*$")
+_POOL_DEF = re.compile(r"^\s*(\w+):\s*\.(?:word|4byte)\s+0x([0-9a-fA-F]{8})\s*$")
+
+
+def _shifted_io_literals(lines):
+    """Code that reuses an I/O address literal as a bit constant: `ldr r2, =0x04000304` (POWCNT)
+    then `lsr r0, r2, #11` = 0x8000; `ldr r0, =0x04000006` then `lsr r0, r0, #13` = 0x2000 (DISPCNT's
+    window 0 bit, the trainer eye-contact effect). With the literal moved (+0x08000000) the shift
+    gives other bits. `lsl rD, rS, #5` + `lsr rD, rD, #(n + 5)` gives the DS's: the delta (bit 27)
+    falls off the top. Two bytes longer: the assembler places what follows."""
+    pool = {}
+    for l in lines:
+        for part in l.split("\n"):  # (a pool entry carries its `.balign 4` in the same line)
+            m = _POOL_DEF.match(part)
+            if m:
+                pool[m.group(1)] = int(m.group(2), 16)
+    moved = [(lo + PORT_DS_DELTA, hi + PORT_DS_DELTA) for lo, hi in _DS_RANGES if lo >= 0x04000000]
+    for i, l in enumerate(lines):
+        m = _LSR_IMM.match(l)
+        if not m:
+            continue
+        ind, dst, src, n = m.group(1), m.group(2), m.group(3), int(m.group(4), 0)
+        j, steps = i - 1, 0
+        while j >= 0 and steps < 12:
+            t = lines[j]
+            j, steps = j - 1, steps + 1
+            lab = re.match(r"^(\w+):\s*$", t)
+            if lab:  # (a branch target: go on from the one earlier branch to it, if there is one)
+                br = [x for x in range(max(0, j - 12), j + 1) if re.match(rf"\s*b\w*\s+{lab.group(1)}\s*$", lines[x])]
+                if br:
+                    j = br[-1] - 1
+                continue
+            lm = _LDR_LABEL.match(t)
+            if lm and lm.group(1) == src:
+                v = pool.get(lm.group(2))
+                if v is not None and any(lo <= v < hi for lo, hi in moved) and n + 5 < 32:
+                    lines[i] = f"{ind}lsl {dst}, {src}, #5\n{ind}lsr {dst}, {dst}, #{hex(n + 5)}"
+                break
+            # (a call or return between: stop)
+            if re.match(r"\s*(blx?\s|bx\s|pop\b)", t) or re.match(rf"\s*\w+\s+{src}\b", t) and not re.match(r"\s*(str|cmp|tst)", t):
+                break
 
 
 def _move_io_base_immediates(lines):

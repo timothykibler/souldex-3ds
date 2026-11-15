@@ -1,3 +1,66 @@
+diff --git a/include/render_window.h b/include/render_window.h
+index 20a3caf..537f6e6 100644
+--- a/include/render_window.h
++++ b/include/render_window.h
+@@ -48,6 +48,6 @@ void sub_0200E398(BgConfig *bgConfig, u32 a1, u32 a2, u32 a3, enum HeapID heapID
+ u32 sub_0200E3D8(void);
+ u32 sub_0200E640(int frame);
+ void sub_0200EB68(Window *window, int a1);
+-void sub_0200F478(void);
++void sub_0200F478(void *a0);
+ 
+ #endif // POKEHEARTGOLD_RENDER_WINDOW_H
+diff --git a/include/sound_02004A44.h b/include/sound_02004A44.h
+index 91057da..40ce5e8 100644
+--- a/include/sound_02004A44.h
++++ b/include/sound_02004A44.h
+@@ -51,7 +51,7 @@ void GF_SndHandleSetPlayerVolume(u32 a0, u32 a1);
+ void GF_SndHandleSetInitialVolume(s32 a0, s32 a1);
+ u16 GF_GetVolumeBySeqNo();
+ 
+-void sub_02005448(void);
++void sub_02005448(int seqNo);
+ void Sound_SetScene(int a0);
+ void sub_02005BEC(BOOL);
+ 
+diff --git a/include/unk_0202D230.h b/include/unk_0202D230.h
+index ad53fb5..960b69f 100644
+--- a/include/unk_0202D230.h
++++ b/include/unk_0202D230.h
+@@ -10,7 +10,7 @@ void sub_0202D234(u32 a0);
+ u32 sub_0202D284(u32 a0, u32 a1, void *a2);
+ void sub_0202D308(u32 a0, u32 a1, void *a2);
+ void sub_0202D3B0(u32 a0, u8 a1, u32 a2, u32 a3);
+-u32 sub_0202D3DC(void);
++u32 sub_0202D3DC(void *a0);
+ void sub_0202D3E4(u32 a0, u32 a1);
+ u32 sub_0202D450(FrontierData *frontierData, u32 a1);
+ u32 sub_0202D488(FrontierData *frontierData, u32 a1);
+diff --git a/include/unk_02030A98.h b/include/unk_02030A98.h
+index 0a6fc7b..594c9e2 100644
+--- a/include/unk_02030A98.h
++++ b/include/unk_02030A98.h
+@@ -31,6 +31,6 @@ void sub_0203126C(FrontierSave *a0, u32 a1, u32 a2, u16 a3);
+ u32 *sub_020312C4(SaveData *saveData, u32 a1, u32 *out);
+ u32 sub_020312E0(SaveData *saveData, u32 *a1, u32 a2, u32 a3);
+ u32 sub_02030E98(u32 a0);
+-void sub_02031188(void);
++void sub_02031188(FrontierSave *frontier);
+ 
+ #endif // POKEHEARTGOLD_UNK_02030A98_H
+diff --git a/include/unk_020632B0.h b/include/unk_020632B0.h
+index ddba443..9d2a29c 100644
+--- a/include/unk_020632B0.h
++++ b/include/unk_020632B0.h
+@@ -5,7 +5,7 @@
+ 
+ BOOL TryGetSeenByNpcTrainers(FieldSystem *fieldSystem, BOOL doublesEligible);
+ int sub_0206457C(FieldSystem *fieldSystem, LocalMapObject *localMapObject, PlayerAvatar *playerAvatar, int a3, int a4, int a5, int a6, u16 trainerNum);
+-BOOL sub_02064598(void);
++BOOL sub_02064598(int a0);
+ void sub_020645AC(int a0);
+ 
+ #endif // POKEHEARTGOLD_UNK_020632B0_H
 diff --git a/src/battle/battle_system.c b/src/battle/battle_system.c
 index d0263ff..ec5f189 100644
 --- a/src/battle/battle_system.c
@@ -143,3 +206,66 @@ index a8a81eb..c2ab7fa 100644
      UnkStruct_021EC94C *v0 = a0->unkF58;
  
      for (int i = 0; i < a1; i++) {
+diff --git a/src/overlay_44_0222CDAC.c b/src/overlay_44_0222CDAC.c
+index fd81461..555626e 100644
+--- a/src/overlay_44_0222CDAC.c
++++ b/src/overlay_44_0222CDAC.c
+@@ -1511,8 +1511,7 @@ s32 ov44_0222B528(UnkStruct_ov44_022319EC *arg0, s32 arg1) {
+         sub_0202C03C(arg0->unk0);
+         void *saveArray = SaveArray_Get(arg0->saveData, 31);
+         sub_02031710(saveArray);
+-        Save_Frontier_GetStatic(arg0->saveData);
+-        sub_02031188();
++        sub_02031188(Save_Frontier_GetStatic(arg0->saveData));  // (port: the DS passed this in r0 by accident)
+         arg0->unk348 = 14;
+         arg0->unk4 = sub_020396FC(arg0->saveData, 1188);
+         ov44_0222F510(arg0, 23, 1);
+@@ -4030,7 +4029,7 @@ u8 ov44_0222F8F0(UnkStruct_ov44_022319EC *arg0) {
+ 
+ void ov44_0222F910(UnkStruct_ov44_022319EC *arg0) {
+     if (arg0->unk18C != 0) {
+-        sub_0200F478();
++        sub_0200F478((void *)arg0->unk18C);  // (port: the DS passed this in r0 by accident)
+         arg0->unk18C = 0;
+         if (WindowIsInUse(&arg0->unk2D0) != 0) {
+             ClearFrameAndWindow2(&arg0->unk2D0, 0);
+diff --git a/src/overlay_44_02235340.c b/src/overlay_44_02235340.c
+index 986a1fe..6d8da5c 100644
+--- a/src/overlay_44_02235340.c
++++ b/src/overlay_44_02235340.c
+@@ -821,8 +821,7 @@ s32 ov44_02233F20(UnkStruct_ov44_02235340 *arg0) {
+ 
+ void ov44_02233F3C(UnkStruct_ov44_02235340 *arg0) {
+     if (ov44_02233EF8(arg0) != 0) {
+-        GF_GetCurrentPlayingBGM();
+-        sub_02005448();
++        sub_02005448(GF_GetCurrentPlayingBGM());  // (port: the DS passed this in r0 by accident)
+     }
+ }
+ 
+diff --git a/src/scrcmd_battle.c b/src/scrcmd_battle.c
+index f027f74..c16d1cf 100644
+--- a/src/scrcmd_battle.c
++++ b/src/scrcmd_battle.c
+@@ -58,7 +58,7 @@ BOOL ScrCmd_TrainerStepTowardsPlayer(ScriptContext *ctx) {
+         return TRUE;
+     }
+ 
+-    if (sub_02064598() == TRUE) {
++    if (sub_02064598(*r5) == TRUE) {  // (port: the DS passed the task in r0 by accident)
+         sub_020645AC(*r5);
+         *r5 = 0;
+         *var1 = 1;
+diff --git a/src/unk_0204A3F4.c b/src/unk_0204A3F4.c
+index 8748b66..6ec471a 100644
+--- a/src/unk_0204A3F4.c
++++ b/src/unk_0204A3F4.c
+@@ -159,7 +159,7 @@ void sub_0204A698(u32 a0) {
+ }
+ 
+ u32 sub_0204A6A0(u32 unused_0) {
+-    return sub_0202D3DC();
++    return sub_0202D3DC((void *)unused_0);  // (port: the DS passed this in r0 by accident)
+ }
+ 
+ void sub_0204A6A8(FieldSystem *fieldSystem) {
