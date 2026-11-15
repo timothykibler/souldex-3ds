@@ -136,7 +136,7 @@ def compile_runtime():
             cmd = [CC, "-c", "-march=armv6k", "-mfloat-abi=hard", s, "-o", o]
         else:
             uses_ctru = "<3ds.h>" in open(s).read()
-            cmd = [CC, "-c"] + cg.CFLAGS + ["-w", f"-I{ROOT}/port/runtime", f"-DPORT_DEBUG={0 if RELEASE else 1}"]
+            cmd = [CC, "-c"] + cg.CFLAGS + ["-w", "-Werror=implicit-function-declaration", f"-I{ROOT}/port/runtime", f"-DPORT_DEBUG={0 if RELEASE else 1}"]
             cmd += (["-I/opt/devkitpro/libctru/include", "-D__3DS__", f"-I{ROOT}/port/include"] if uses_ctru else flags)
             if s.endswith("main.c"):
                 cmd += [f'-DPORT_BUILD_ID="{build_id}"']
@@ -169,7 +169,7 @@ OVDISPATCH_WRAPS = []
 def link(objs, libs, stubs):
     elf = f"{B}/soulsilver.elf"
     cmd = [CC, "-specs=" + f"{B}/port.specs", "-march=armv6k", "-mtune=mpcore", "-mfloat-abi=hard",
-           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx,--wrap=Handle3DBufferSwapRequest,--wrap=CallFieldTask_ContinueGame_Normal,--wrap=SysTask_CreateOnVBlankQueue",
+           "-mtp=soft", "-L/opt/devkitpro/libctru/lib", "-Wl,-Map," + f"{B}/soulsilver.map", "-Wl,--wrap=GF_AssertFail,--wrap=G3X_GetClipMtx,--wrap=G3X_GetVectorMtx,--wrap=G3X_GetBoxTestResult,--wrap=G3X_GetPositionTestResult,--wrap=G3X_GetVectorTestResult,--wrap=G3X_GetMtxStackLevelPV,--wrap=G3X_GetMtxStackLevelPJ,--wrap=Handle3DBufferSwapRequest,--wrap=CallFieldTask_ContinueGame_Normal,--wrap=SysTask_CreateOnVBlankQueue",
            ] + [f"-Wl,--wrap={w}" for w in OVDISPATCH_WRAPS] + [
            "-o", elf] + objs + ([stubs] if stubs else []) + ["-Wl,--start-group"] + libs + \
           ["-lcitro3d", "-lctru", "-lm", "-Wl,--end-group"]

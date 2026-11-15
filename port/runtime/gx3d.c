@@ -25,6 +25,19 @@ typedef uint8_t u8;
 
 #define IO(off) ((volatile u32 *)(uintptr_t)(0x04000000 + PORT_DS_DELTA + (off)))
 
+static void worker_start(void);
+static void g3_sync(void);           // (the game waits for the geometry engine's core: see below)
+static int vblank_impl(u32 swap, u32 vp);
+static void *sFrameLock;             // (the frames' rotation against the renderer taking the shown one)
+static volatile int sDrawing = -1;   // (the frame the renderer took last: its CPU, then the GPU, read it until it takes the next)
+int port_core2_thread(void (*fn)(void *), void *arg, int below_render);
+void *port_event_new(void);
+void port_event_wait(void *e);
+void port_event_signal(void *e);
+void *port_lock_new(void);
+void port_lock(void *l);
+void port_unlock(void *l);
+
 // ---------------------------------------------------------------- matrices (4x4, 20.12, row-major)
 typedef s32 Mtx[16];
 
@@ -378,10 +391,24 @@ void port_g3_hist_report(void) {  // (the command mix since the last report, per
     memset(sHist, 0, sizeof(sHist));
 }
 
+// (defined before its uses: an undeclared g3_sync_r became an implicit call, which the build's
+// automatic stubs answered with an empty function, so no read waited for the geometry engine)
+uint32_t gG3Syncs[8];  // (per reason: clip, vector, box, pos, vec, levels, trace)
+#define g3_sync_r(r) do { gG3Syncs[r]++; g3_sync(); } while (0)
 int __real_G3X_GetClipMtx(void *m);
-int __wrap_G3X_GetClipMtx(void *m) { publish_matrices(); return __real_G3X_GetClipMtx(m); }
+int __wrap_G3X_GetClipMtx(void *m) { g3_sync_r(0); publish_matrices(); return __real_G3X_GetClipMtx(m); }
+int __real_G3X_GetBoxTestResult(void *in);
+int __wrap_G3X_GetBoxTestResult(void *in) { g3_sync_r(2); return __real_G3X_GetBoxTestResult(in); }
+int __real_G3X_GetPositionTestResult(void *v, void *w);
+int __wrap_G3X_GetPositionTestResult(void *v, void *w) { g3_sync_r(3); return __real_G3X_GetPositionTestResult(v, w); }
+int __real_G3X_GetVectorTestResult(void *v);
+int __wrap_G3X_GetVectorTestResult(void *v) { g3_sync_r(4); return __real_G3X_GetVectorTestResult(v); }
+int __real_G3X_GetMtxStackLevelPV(void *l);
+int __wrap_G3X_GetMtxStackLevelPV(void *l) { g3_sync_r(5); return __real_G3X_GetMtxStackLevelPV(l); }
+int __real_G3X_GetMtxStackLevelPJ(void *l);
+int __wrap_G3X_GetMtxStackLevelPJ(void *l) { g3_sync_r(5); return __real_G3X_GetMtxStackLevelPJ(l); }
 int __real_G3X_GetVectorMtx(void *m);
-int __wrap_G3X_GetVectorMtx(void *m) { publish_matrices(); return __real_G3X_GetVectorMtx(m); }
+int __wrap_G3X_GetVectorMtx(void *m) { g3_sync_r(1); publish_matrices(); return __real_G3X_GetVectorMtx(m); }
 
 static void run_cmd(u8 cmd, const u32 *p) {
     Mtx m;
@@ -516,6 +543,7 @@ static void init_once(void) {
     // (written straight by the game's assembly: a value no game writes marks "nothing new")
     *IO(0x540) = 0xFFFFFFFFu;
     *IO(0x580) = 0xFFFFFFFFu;
+    worker_start();
 }
 
 // Moves to the next command of the packed word that needs parameters (running those that don't).
@@ -532,8 +560,7 @@ static void fifo_advance(void) {
     sFifoNCmd = 0;
 }
 
-void port_gx_fifo_write(u32 word) {
-    init_once();
+static void fifo_write_impl(u32 word) {
     sFifoWords++;
     if (sFifoNCmd == 0) {
         // a command word: up to four commands, lowest byte first
@@ -557,15 +584,11 @@ void port_gx_fifo_write(u32 word) {
 
 uint64_t gG3Ticks;  // (profiling: CPU time in the geometry engine, display lists and register writes)
 uint64_t port_ctr_ticks(void);
-uint32_t gG3Sends;  // (calls, per log period)
-void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
-    (void)dest;
-    gG3Sends++;
+static void fifo_send_impl(const u32 *src, u32 words) {
     uint64_t t = port_ctr_ticks();
-    init_once();
-    const u32 *s = src, *end = s + bytes / 4;
+    const u32 *s = src, *end = s + words;
     // (a packed command word still waiting for parameters: finished word by word first)
-    while (s < end && sFifoNCmd) port_gx_fifo_write(*s++);
+    while (s < end && sFifoNCmd) fifo_write_impl(*s++);
     // The rest decoded in place: each command word, then each of its commands run with its
     // parameters where they lie (no call and no copy per word: decoding was 3 of the field's
     // 8.4 ms in the geometry engine). A command whose parameters run past the end is left to
@@ -586,7 +609,7 @@ void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
             if (end - s < np) {  // (its parameters continue in a later transfer)
                 memcpy(sFifoCmds, cmds, 4);
                 sFifoNCmd = n; sFifoCur = i; sFifoN = 0;
-                while (s < end) port_gx_fifo_write(*s++);
+                while (s < end) fifo_write_impl(*s++);
                 gG3Ticks += port_ctr_ticks() - t;
                 return;
             }
@@ -600,29 +623,165 @@ void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
 
 u32 port_gx_fifo_words(void) { return sFifoWords; }
 
+// A write to a command port (0x440-0x5FF).
+static void port_cmd_impl(u32 off, u32 value) {
+    u8 cmd = (u8)((off - 0x400) >> 2);
+    if (cmd != sPortCmd) { sPortCmd = cmd; sPortN = 0; }
+    if (kParams[cmd] == 0) { run(cmd, NULL); return; }
+    sPortParams[sPortN++] = value;
+    if (sPortN >= kParams[cmd]) { run(cmd, sPortParams); sPortN = 0; }
+}
+
+// ---------------------------------------------------------------- the geometry engine's own core
+// On the New 3DS the commands are queued and run on core 2 (beside the render thread) while the
+// game goes on: the geometry engine was most of an update's CPU time in the field, and the game
+// only needs its results at a few points, which wait for it to catch up (g3_sync): the box,
+// position and vector tests, the matrix stack levels, the clip and direction matrices. The
+// VBlank's frame swap goes through the queue in order, so the geometry of a frame can finish
+// while the game builds the next (one frame later on screen at most). Elsewhere (the original
+// 3DS: no spare core) everything runs on the game's thread as before. debug.txt "g3thread 0"
+// turns it off; "g3thread 2" runs it below the render thread's priority (default: above it).
+//
+// The queue: records of words in a ring, never wrapping inside a record (a pad record skips the
+// ring's tail). A FIFO record's words are decoded where they lie.
+#define RING_WORDS (1u << 16)
+#define REC_FIFO   0x01000000u  // | n: n FIFO words follow
+#define REC_PORT   0x02000000u  // | offset: a command port write, its value follows
+#define REC_VBLANK 0x03000000u  // swap register, viewport register follow
+#define REC_PAD    0x0F000000u  // the rest of the ring unused
+int port_g3_thread = 1;  // (debug.txt "g3thread N": 0 on the game's thread, 1 core 2 above the render thread, 2 below it)
+static int sWorker;                    // (the worker is running)
+static u32 *sRing;
+static volatile u32 sHead, sTail;      // (words written by the game / consumed by the worker, ever)
+static volatile int sWorkerSleeping, sGameWaiting;
+static void *sWorkEvent, *sProgressEvent;
+uint64_t gG3QueueWait;                 // (the game waiting for the worker: a full ring or a sync)
+
+static u32 sMainFpscr;  // (the game thread's floating-point mode, for the worker's to match)
+static void worker_main(void *arg) {
+    (void)arg;
+    __asm__ volatile("vmsr fpscr, %0" : : "r"(sMainFpscr));
+    { u32 f; __asm__ volatile("vmrs %0, fpscr" : "=r"(f)); port_log("geometry engine: fpscr %08lX (game thread's)\n", (unsigned long)f); }
+    for (;;) {
+        while (sTail == sHead) {
+            sWorkerSleeping = 1;
+            __atomic_thread_fence(__ATOMIC_SEQ_CST);
+            if (sTail != sHead) { sWorkerSleeping = 0; break; }
+            port_event_wait(sWorkEvent);
+            sWorkerSleeping = 0;
+        }
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        u32 at = sTail & (RING_WORDS - 1);
+        u32 h = sRing[at], n;
+        switch (h & 0xFF000000u) {
+        case REC_FIFO: n = h & 0xFFFFFF; fifo_send_impl(&sRing[at + 1], n); n++; break;
+        case REC_PORT: port_cmd_impl(h & 0xFFFF, sRing[at + 1]); n = 2; break;
+        case REC_VBLANK: vblank_impl(sRing[at + 1], sRing[at + 2]); n = 3; break;
+        default: n = RING_WORDS - at; break;  // (pad)
+        }
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sTail += n;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (sGameWaiting) { sGameWaiting = 0; port_event_signal(sProgressEvent); }
+    }
+}
+
+// The game's thread waits until the worker has done all but `left` words of the ring.
+static void wait_worker(u32 maxPending) {
+    if (sHead - sTail <= maxPending) return;
+    uint64_t t0 = port_ctr_ticks();
+    while (sHead - sTail > maxPending) {
+        sGameWaiting = 1;
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
+        if (sHead - sTail <= maxPending) { sGameWaiting = 0; break; }
+        port_event_wait(sProgressEvent);
+    }
+    gG3QueueWait += port_ctr_ticks() - t0;
+}
+static void g3_sync(void) { if (sWorker) wait_worker(0); }
+
+// One record: a header and fixed words, then (FIFO) `n` words from `data`.
+static void enqueue(const u32 *rec, u32 nrec, const u32 *data, u32 n) {
+    u32 total = nrec + n;
+    u32 at = sHead & (RING_WORDS - 1);
+    if (at + total > RING_WORDS) {  // (not enough room before the ring's end: pad it)
+        wait_worker(at);  // (room for the pad: the words from here to the end)
+        sRing[at] = REC_PAD;
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        sHead += RING_WORDS - at;
+        at = 0;
+    }
+    wait_worker(RING_WORDS - total);
+    memcpy(&sRing[at], rec, nrec * 4);
+    if (n) memcpy(&sRing[at + nrec], data, n * 4);
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    sHead += total;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (sWorkerSleeping) { sWorkerSleeping = 0; port_event_signal(sWorkEvent); }
+}
+
+static void worker_start(void) {
+    if (!port_g3_thread) return;
+    sRing = malloc(RING_WORDS * 4);
+    sWorkEvent = port_event_new();
+    sProgressEvent = port_event_new();
+    sFrameLock = port_lock_new();
+    if (!sRing || !sWorkEvent || !sProgressEvent || !sFrameLock) { port_log("geometry engine: on the game's thread (no memory)\n"); return; }
+    __asm__ volatile("vmrs %0, fpscr" : "=r"(sMainFpscr));
+    sWorker = port_core2_thread(worker_main, NULL, port_g3_thread == 2);
+    port_log(sWorker ? "geometry engine: on core 2 (%s the render thread)\n" : "geometry engine: on the game's thread\n", port_g3_thread == 2 ? "below" : "above");
+}
+
+void port_gx_fifo_write(u32 word) {
+    init_once();
+    if (sWorker) { u32 rec[1] = { REC_FIFO | 1 }; enqueue(rec, 1, &word, 1); return; }
+    fifo_write_impl(word);
+}
+
+uint32_t gG3Sends;  // (calls, per log period)
+void port_gx_fifo_send(const void *src, void *dest, u32 bytes) {
+    (void)dest;
+    init_once();
+    gG3Sends++;
+    const u32 *s = src;
+    u32 n = bytes / 4;
+    if (!sWorker) { fifo_send_impl(s, n); return; }
+    while (n) {  // (in pieces of at most a sixteenth of the ring)
+        u32 k = n > RING_WORDS / 16 ? RING_WORDS / 16 : n;
+        u32 rec[1] = { REC_FIFO | k };
+        enqueue(rec, 1, s, k);
+        s += k; n -= k;
+    }
+}
+
 // Every write to a DS 3D register (the rewritten reg_G3_* / reg_G3X_* assignments).
 void port_g3_write(unsigned long addr, unsigned long value) {
     init_once();
     u32 off = (u32)addr - (0x04000000 + PORT_DS_DELTA);
     if (off >= 0x400 && off < 0x440) { port_gx_fifo_write((u32)value); return; }
     if (off >= 0x440 && off < 0x600) {
-        u8 cmd = (u8)((off - 0x400) >> 2);
-        if (cmd != sPortCmd) { sPortCmd = cmd; sPortN = 0; }
-        if (kParams[cmd] == 0) { run(cmd, NULL); return; }
-        sPortParams[sPortN++] = (u32)value;
-        if (sPortN >= kParams[cmd]) { run(cmd, sPortParams); sPortN = 0; }
+        if (sWorker) { u32 rec[2] = { REC_PORT | off, (u32)value }; enqueue(rec, 2, NULL, 0); return; }
+        port_cmd_impl(off, (u32)value);
         return;
     }
     *IO(off) = (u32)value;  // (rendering registers: just stored, the renderer reads them)
 }
 
 // ---------------------------------------------------------------- frames
-const G3Frame *port_g3_frame(void) { return sHaveShown ? &sFrames[sShown] : NULL; }
+// The frame to draw (the renderer, once per picture, after the GPU finished the last).
+const G3Frame *port_g3_frame(void) {
+    if (sFrameLock) port_lock(sFrameLock);
+    const G3Frame *f = NULL;
+    if (sHaveShown) { sDrawing = sShown; f = &sFrames[sShown]; }
+    if (sFrameLock) port_unlock(sFrameLock);
+    return f;
+}
 
 int port_g3_vblank(void) {
     init_once();
     extern uint32_t port_trace3d;
     if (port_trace3d && port_frame_count == port_trace3d) {
+        g3_sync();
         port_log("3D trace, frame %lu: command counts:", (unsigned long)port_frame_count);
         for (int i = 0; i < 128; i++) if (sHist[i]) port_log(" %02X:%lu", i, (unsigned long)sHist[i]);
         port_log("\nprojection:");
@@ -664,26 +823,31 @@ int port_g3_vblank(void) {
         }
         sTraceLeft = 400;  // and the next frame's first commands
     }
-    // (the game's assembly also writes SWAP_BUFFERS straight into its register: seen here)
-    volatile u32 *swapReg = IO(0x540);
-    if (*swapReg != 0xFFFFFFFFu) {
-        sFrames[sBuild].swap = *swapReg;
-        *swapReg = 0xFFFFFFFFu;
-        sSwapPending = 1;
-    }
-    volatile u32 *vpReg = IO(0x580);
-    if (*vpReg != 0xFFFFFFFFu) {
-        memcpy(sFrames[sBuild].viewport, (const void *)vpReg, 4);
-        *vpReg = 0xFFFFFFFFu;
-    }
+    // (the game's assembly also writes SWAP_BUFFERS and VIEWPORT straight into their registers:
+    // seen here, on the game's thread, and passed on in order with the commands)
+    volatile u32 *swapReg = IO(0x540), *vpReg = IO(0x580);
+    u32 swap = *swapReg, vp = *vpReg;
+    *swapReg = 0xFFFFFFFFu;
+    *vpReg = 0xFFFFFFFFu;
+    if (sWorker) { u32 rec[3] = { REC_VBLANK, swap, vp }; enqueue(rec, 3, NULL, 0); return 0; }
+    return vblank_impl(swap, vp);
+}
+
+// The VBlank: a SWAP_BUFFERS since the last one shows the built frame.
+static int vblank_impl(u32 swap, u32 vp) {
+    if (swap != 0xFFFFFFFFu) { sFrames[sBuild].swap = swap; sSwapPending = 1; }
+    if (vp != 0xFFFFFFFFu) memcpy(sFrames[sBuild].viewport, &vp, 4);
     if (!sSwapPending) return 0;
     sSwapPending = 0;
-    {  // (the built frame is shown; building goes on in the one shown before the last)
-        int next = 3 - sBuild - sShown;
-        sShown = sBuild;
-        sBuild = next;
-    }
+    // (the built frame is shown; building goes on in one neither shown nor being drawn: with the
+    // geometry engine on its own core, it can swap twice while one frame is drawn)
+    if (sFrameLock) port_lock(sFrameLock);
+    int next = 0;
+    while (next == sBuild || next == sDrawing) next++;
+    sShown = sBuild;
+    sBuild = next;
     sHaveShown = 1;
+    if (sFrameLock) port_unlock(sFrameLock);
     G3Frame *f = &sFrames[sBuild];
     f->nv = 0;
     f->np = 0;

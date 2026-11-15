@@ -161,6 +161,7 @@ int main(void) {
             else if (sscanf(line, "holes %u", &n) == 1) { extern int port_hole_fill; port_hole_fill = (int)n; }
             else if (sscanf(line, "warp %u %u %u %u", &n, &m, &per, &q) == 4) { if (sNumWarps < (int)(sizeof(sWarps) / sizeof(sWarps[0]))) sWarps[sNumWarps++] = (Warp){ (int)n, (int)m, (int)per, (int)q }; }
             else if (!strncmp(line, "warpmark", 8)) sWarpMark = 1;
+            else if (sscanf(line, "g3thread %u", &n) == 1) { extern int port_g3_thread; port_g3_thread = (int)n; }
             else if (sscanf(line, "double %u", &n) == 1) { extern int port_double_speed; port_double_speed = (int)n; }
             else if (sscanf(line, "wide %u", &n) == 1) { extern int port_wide_mode; port_wide_mode = (int)n; }
             else if (sscanf(line, "trace3d %u", &n) == 1) { extern uint32_t port_trace3d; port_trace3d = n; }

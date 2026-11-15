@@ -154,7 +154,9 @@ void port_frame(void) {
         gProfPlanes = gProfSprites = gProf3d = gProf3dTex = gProf3dWide = gProf3dIds = 0;
         extern u64 gGpu2dWaitTicks;
         extern u64 gG3Ticks;
-        { extern uint32_t gG3Sends; port_log("  geometry engine %lu us per frame (part of the game code), %lu sends\n", (unsigned long)(gG3Ticks / 600 / 268), (unsigned long)(gG3Sends / 600)); gG3Sends = 0; }
+        { extern uint32_t gG3Sends; port_log("  geometry engine %lu us per frame (part of the game code), %lu sends\n", (unsigned long)(gG3Ticks / 600 / 268), (unsigned long)(gG3Sends / 600)); gG3Sends = 0;
+          extern uint64_t gG3QueueWait; port_log("  game waiting for the geometry engine's core %lu us per frame\n", (unsigned long)(gG3QueueWait / 600 / 268)); gG3QueueWait = 0;
+          extern uint32_t gG3Syncs[8]; port_log("  syncs per frame x100: clip %lu vec %lu box %lu pos %lu vtest %lu levels %lu\n", (unsigned long)(gG3Syncs[0] / 6), (unsigned long)(gG3Syncs[1] / 6), (unsigned long)(gG3Syncs[2] / 6), (unsigned long)(gG3Syncs[3] / 6), (unsigned long)(gG3Syncs[4] / 6), (unsigned long)(gG3Syncs[5] / 6)); memset(gG3Syncs, 0, sizeof(gG3Syncs)); }
         gG3Ticks = 0;
         extern uint64_t gRenderWaitTicks;
         port_log("  waiting for the render core %lu us per frame\n", (unsigned long)(gRenderWaitTicks / 600 / 268));

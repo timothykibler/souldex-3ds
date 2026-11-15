@@ -251,3 +251,24 @@ void port_watchdog_start(void) {
     svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
     if (!threadCreate(watchdog_main, NULL, 8 * 1024, prio - 1, -2, true)) port_log("watchdog: not started\n");
 }
+
+// ---------------------------------------------------------------- threads for the geometry engine
+// (gx3d.c can't include <3ds.h>: these wrap what it needs.) A thread on the New 3DS's core 2, above
+// the render thread's priority (at the game's: the game waits on it), or below it; none elsewhere
+// (the original 3DS has no core for it: the geometry engine then runs on the game's thread, as it
+// always did).
+int port_core2_thread(void (*fn)(void *), void *arg, int below_render) {
+    bool n3ds = false;
+    APT_CheckNew3DS(&n3ds);
+    if (!n3ds) return 0;
+    s32 prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    Thread t = threadCreate(fn, arg, 64 * 1024, below_render ? prio + 2 : prio, 2, true);
+    return t != NULL;
+}
+void *port_event_new(void) { LightEvent *e = malloc(sizeof(LightEvent)); if (e) LightEvent_Init(e, RESET_ONESHOT); return e; }
+void port_event_wait(void *e) { LightEvent_Wait(e); }
+void port_event_signal(void *e) { LightEvent_Signal(e); }
+void *port_lock_new(void) { LightLock *l = malloc(sizeof(LightLock)); if (l) LightLock_Init(l); return l; }
+void port_lock(void *l) { LightLock_Lock(l); }
+void port_unlock(void *l) { LightLock_Unlock(l); }
