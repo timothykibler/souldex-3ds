@@ -155,6 +155,7 @@ int main(void) {
             else if (sscanf(line, "strmtest %u", &n) == 1) { extern int port_strmtest_frame_no; port_strmtest_frame_no = (int)n; }
             else if (!strncmp(line, "cheatlog", 8)) { extern int port_cheat_log; port_cheat_log = 1; }
             else if (sscanf(line, "edge %u", &n) == 1) { extern int port_edge_mode; port_edge_mode = (int)n; }
+            else if (sscanf(line, "fog %u", &n) == 1) { extern int port_fog_mode; port_fog_mode = (int)n; }
             else if (sscanf(line, "border %u", &n) == 1) { extern int port_border; port_border = (int)n; }
             else if (!strncmp(line, "scale1", 6)) { extern int port_scale1; port_scale1 = 1; }
             else if (sscanf(line, "snap %u", &n) == 1) { extern int port_g3_snap; port_g3_snap = (int)n; }

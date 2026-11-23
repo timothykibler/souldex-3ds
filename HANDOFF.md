@@ -45,7 +45,8 @@ Fixed this session (all in git history): VTX_DIFF scale; u64/s64 aligned to 4 li
    804 MHz with L2 cache, roughly 3x Azahar's timing, so hardware numbers may differ a lot:
    measure there first (the log prints this breakdown every 600 frames).
 3. **3D features not done**: anti-aliasing (DISP3DCNT bit 4, the field sets it), shadow polygons,
-   wireframe, toon/highlight, fog, w-buffering, translucent Y-sorting, rear-plane, display capture.
+   wireframe, toon/highlight, w-buffering, translucent Y-sorting, rear-plane, display capture.
+   (Fog is done: see T4b in PROJECT_STATUS.md.)
    Edge marking uses one edge colour (HGSS sets all eight alike).
 4. **Assembly that writes 3D command registers directly** (`sub_02015E64`, `sub_020161CC`,
    `ov41_022465D8`; overlay 41 only): see the git history of this file for the decoded plan.
@@ -81,8 +82,8 @@ Classes found and fixed so far:
 - Calls into memory several overlays share (7, 8 and 10 at 0x0221BE20): the decomp names one
   occupant, the DS runs whichever is loaded. port/ovdispatch.py generates trampolines for the 360
   such targets, dispatched by runtime/overlay.c to the loaded overlay (logged: "ovdispatch:").
-- Known leftover: code deriving values from a moved I/O address (overlay 7: `lsr r1, r0, #13` of
-  WINOUT's address) gets different bits than on the DS.
+- Code deriving bit constants from a moved I/O address (overlay 7: `lsr r1, r0, #13` of WINOUT's
+  address): `_shifted_io_literals` in mwasm2gas rewrites these shifts to give the DS's bits.
 
 ## Testing on a 3DS without the SD card
 

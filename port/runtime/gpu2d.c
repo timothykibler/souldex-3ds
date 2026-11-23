@@ -59,6 +59,7 @@ static float sOX, sOY;  // (offset added to every quad: 0, the projection places
 // (debug.txt "scale1": 1:1 whatever the setting, for the comparison with the software renderer.)
 int port_wide_mode = 1;    // 0 never (the DS picture as it is), 1 when the scene is 3D-backed (default), 2 always (debug.txt "wide N")
 int port_edge_mode = 1;    // edge marking (debug.txt "edge 0" turns it off)
+int port_fog_mode = 1;     // 3D fog (debug.txt "fog 0" turns it off, "fog 2" shows what's fogged in red)
 int port_scale1;
 int port_display_fill;     // 1.25x fill (else 1:1)
 int port_side_fill;        // in fill mode, the top screen's sides continue the picture
@@ -1879,7 +1880,8 @@ static void build_batches(const G3Frame *f, u32 disp3d) {
         u32 wrap = (p->teximage >> 16) & 0xF;
         int depthWrite = !tr || (p->polyattr & 0x800);
         // colour: mode, wrap, depth "equal", depth write
-        u32 kc = ((p->polyattr >> 4) & 3) | wrap << 2 | ((p->polyattr >> 14) & 1) << 6 | (u32)depthWrite << 7;
+        u32 kc = ((p->polyattr >> 4) & 3) | wrap << 2 | ((p->polyattr >> 14) & 1) << 6 | (u32)depthWrite << 7
+               | ((p->polyattr >> 15) & 1) << 8;  // (the polygon's fog flag)
         // IDs: the polygon ID, wrap
         u32 ki = ((p->polyattr >> 24) & 63) | wrap << 6;
         u32 kk[2] = { kc, ki };
@@ -1893,6 +1895,67 @@ static void build_batches(const G3Frame *f, u32 disp3d) {
     }
 }
 
+// ---------------------------------------------------------------- fog
+// DS fog: a density from the pixel's depth (32 table entries, spaced 0x400 >> shift from the fog
+// offset, linear between them), mixing the fog colour in. Drawn with the PICA's fog unit. Its
+// table is indexed by depth; zFlip makes that the DS's depth (the renderer's own runs the other
+// way). Its value is how much of the fragment stays.
+// The DS fogs the finished picture, by a per-pixel flag that a translucent polygon without the
+// fog flag clears: Morty's gym is all fog, and its candlelight is such a polygon, showing the
+// room through it. So: the opaque polygons unfogged; the translucent unfogged ones' depth written
+// (FOG_MARK: the pixels they cover no longer match the opaque depth); the opaque fogged ones again
+// where their depth still matches (FOG_OPAQUE); then the translucent polygons, "greater or equal"
+// so the marked pixels still draw. Not modelled: the alpha-only mode and fogging of alpha.
+enum { FOG_NONE, FOG_MARK, FOG_OPAQUE };
+static int sFogPass;
+static C3D_FogLut sFogLut;
+static int sFogOn;
+static u32 sFogKey = ~0u;
+
+static float fog_density(u32 disp3d, int depth) {  // 0..1, depth in the DS's 0..0x7FFF
+    int step = 0x400 >> ((disp3d >> 8) & 15), offset = rd16(DS(0x0400035C)) & 0x7FFF;
+    const volatile u8 *table = (const volatile u8 *)DS(0x04000360);
+    if (step < 1) step = 1;
+    int d = depth - offset - step;  // (entry i applies at offset + step * (i + 1))
+    if (d <= 0) return (table[0] & 127) / 127.0f;
+    int i = d / step;
+    if (i >= 31) return (table[31] & 127) / 127.0f;
+    float a = table[i] & 127, b = table[i + 1] & 127;
+    return (a + (b - a) * (d - i * step) / step) / 127.0f;
+}
+
+static void fog_setup(u32 disp3d) {
+    sFogOn = port_fog_mode && (disp3d & 0x80) && !(disp3d & 0x40);
+    if (!sFogOn) return;
+    u32 key = (disp3d >> 8 & 15) | (u32)rd16(DS(0x0400035C)) << 4;
+    const volatile u8 *table = (const volatile u8 *)DS(0x04000360);
+    for (int i = 0; i < 32; i++) key = (key << 5 | key >> 27) ^ table[i];
+    if (key != sFogKey) {
+        sFogKey = key;
+        float v[129], data[256];
+        for (int i = 0; i <= 128; i++) v[i] = 1.0f - fog_density(disp3d, i >= 128 ? 0x7FFF : i * 0x100);
+        for (int i = 0; i < 128; i++) { data[i] = v[i]; data[128 + i] = v[i + 1] - v[i]; }
+        FogLut_FromArray(&sFogLut, data);
+    }
+    u32 c = rd16(DS(0x04000358));
+    u32 r = c & 31, g = c >> 5 & 31, b = c >> 10 & 31;
+    C3D_FogColor(port_fog_mode == 2 ? 0x0000FFu  // (debug.txt "fog 2": fogged polygons in red)
+                 : (r << 3 | r >> 2) | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2) << 16);  // (0xBBGGRR)
+    C3D_FogLutBind(&sFogLut);
+}
+
+// The clear plane, when its fog flag is set: its colour already fogged at its depth.
+static u16 fog_clear(u16 c, u32 disp3d, u32 clear) {
+    if (!sFogOn || !(clear & 0x8000)) return c;
+    float k = fog_density(disp3d, rd16(DS(0x04000354)) & 0x7FFF);
+    u32 fc = rd16(DS(0x04000358)), out = 0;
+    for (int s = 0; s < 15; s += 5) {
+        float a = (c >> s) & 31, b = (fc >> s) & 31;
+        out |= (u32)(a + (b - a) * k + 0.5f) << s;
+    }
+    return (u16)out;
+}
+
 static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
     build_batches(f, disp3d);
     int aref = (disp3d & 4) ? (rd16(DS(0x04000340)) & 31) * 8 : 0;
@@ -1903,6 +1966,8 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
     u32 lastKey = ~0u;
     for (u32 i = 0; i < sNBatch[0][translucent]; i++) {
         const Batch *b = &sBatch[0][translucent][i];
+        const int fogged = (b->key >> 8) & 1;
+        if ((sFogPass == FOG_MARK && fogged) || (sFogPass == FOG_OPAQUE && !fogged)) continue;
         if (b->tex != lastTex || b->key != lastKey) {
             int mode = b->key & 3;
             C3D_TexEnv *env = C3D_GetTexEnv(0);
@@ -1928,11 +1993,17 @@ static void draw_polys(const G3Frame *f, int translucent, u32 disp3d) {
                 C3D_TexEnvFunc(env, C3D_Both, GPU_REPLACE);
             }
             // depth: translucent polygons write depth only when asked; "equal" test on request
-            C3D_DepthTest(true, (b->key >> 6) & 1 ? GPU_EQUAL : GPU_GREATER, (b->key >> 7) & 1 ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+            if (sFogPass == FOG_MARK) C3D_DepthTest(true, GPU_GREATER, GPU_WRITE_DEPTH);
+            else if (sFogPass == FOG_OPAQUE) C3D_DepthTest(true, GPU_EQUAL, GPU_WRITE_COLOR);
+            else C3D_DepthTest(true, (b->key >> 6) & 1 ? GPU_EQUAL : sFogOn && translucent ? GPU_GEQUAL : GPU_GREATER,
+                               (b->key >> 7) & 1 ? GPU_WRITE_ALL : GPU_WRITE_COLOR);
+            if (sFogOn) C3D_FogGasMode(sFogPass == FOG_OPAQUE || (sFogPass == FOG_NONE && translucent && fogged) ? GPU_FOG : GPU_NO_FOG,
+                                       GPU_PLAIN_DENSITY, true);
             lastTex = b->tex; lastKey = b->key;
         }
         C3D_DrawArrays(GPU_TRIANGLES, (int)b->first, (int)b->count);
     }
+    if (sFogOn) C3D_FogGasMode(GPU_NO_FOG, GPU_PLAIN_DENSITY, false);  // (the later passes draw unfogged)
 }
 
 // ---------------------------------------------------------------- edge marking
@@ -2309,7 +2380,8 @@ static void depth_reset(void) {  // (the bound target's depth to the far plane, 
 static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw, float vh, u32 disp3d, u32 clear) {
     C3D_RenderTarget *t = eye > 0 ? s3dTargetR : s3dTarget, *idt = eye > 0 ? sIdTargetR : sIdTarget;
     int ca = (clear >> 16) & 31;
-    u32 cc = rgba((u16)(clear & 0x7FFF), (u8)(ca << 3 | ca >> 2));
+    fog_setup(disp3d);
+    u32 cc = rgba(fog_clear((u16)(clear & 0x7FFF), disp3d, clear), (u8)(ca << 3 | ca >> 2));
     // (per unit of z/w, in clip x of this viewport: the farthest point, at sFar, gets sShiftPx)
     float range = sFar - sConv;
     if (range < 1e-4f) range = 1e-4f;
@@ -2339,7 +2411,7 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
     }
     draw_polys(f, 0, disp3d);
     const int holes = port_hole_fill && !sFlatScene;
-    if (holes) {
+    if (holes && !sFogOn) {  // (with fog, after it: holes take their neighbours' fogged colour)
         hole_fill(eye > 0 ? &s3dTexR : &s3dTex, 0);
         C3D_BindProgram(&sProg3d);
         attrs_3d(f);
@@ -2384,6 +2456,26 @@ static void render3d_eye(const G3Frame *f, int eye, float vx, float vy, float vw
         C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocStereo, shift, sConv, range, 0);
     C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
         C3D_SetViewport(vpx, vpy, vpw, vph);
+    }
+    if (sFogOn) {  // (see "fog")
+        sFogPass = FOG_MARK;
+        draw_polys(f, 1, disp3d);
+        sFogPass = FOG_OPAQUE;
+        if (seams) {  // (the seam-fill copy, at its own offset and depth)
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, ox, oy);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], SEAM_BIAS, 0);
+            draw_polys(f, 0, disp3d);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocXform, sClipX, -sClipY, 0, 0);
+            C3D_FVUnifSet(GPU_VERTEX_SHADER, sLocWbuf, sWbuf[0], sWbuf[1], 0, 0);
+        }
+        draw_polys(f, 0, disp3d);
+        sFogPass = FOG_NONE;
+        if (holes) {
+            hole_fill(eye > 0 ? &s3dTexR : &s3dTex, 0);
+            C3D_BindProgram(&sProg3d);
+            attrs_3d(f);
+            C3D_SetViewport(vpx, vpy, vpw, vph);
+        }
     }
     draw_polys(f, 1, disp3d);
 }

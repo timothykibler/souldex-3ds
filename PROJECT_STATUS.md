@@ -103,7 +103,7 @@ the main source of hardware-only bugs.
 
 | Workaround | Why it's fragile |
 |---|---|
-| **Address shifting in assembly** (`mwasm2gas.py`): data words, `mov`+`lsl` constants, and derived I/O bases are moved by `PORT_DS_DELTA`. | Pattern-based. Any address it misses works in Azahar and crashes on hardware. One known leftover: overlay 7 derives bits from WINOUT's address (`lsr r1, r0, #13`). |
+| **Address shifting in assembly** (`mwasm2gas.py`): data words, `mov`+`lsl` constants, and derived I/O bases are moved by `PORT_DS_DELTA`. | Pattern-based. Any address it misses works in Azahar and crashes on hardware. Code that shifts an I/O address to get a bit constant (overlay 7's WINOUT, T7a) is rewritten too. |
 | **Overlay trampolines** (`ovdispatch.py` and `overlay.c`) for the 360 targets in shared overlay memory. | Depends on the decomp's naming. A missed call runs the wrong overlay's code. |
 | **Cheat address translation** (`cheatmap.py`) from DS addresses to GCC's layout. | Codes that point into unnamed BSS or overlay data are skipped. |
 | **MW ABI emulation**: u64 aligned to 4, flag-returning float compares, and the decibel-table trailing zero. | Needed until the code is fully C and rebuilt with GCC's own ABI. |
@@ -217,7 +217,7 @@ history so far, for example:
 | **T3b** | Native 3D prototype: the map drawn through the game's 3D library | L ⚠ | 4–8 h | — (T3a's findings help) |
 | **T3c** | Native 3D for everything: characters, battles, effects | XL ⚠ | 15–30 h | T3b |
 | **T4a** | Edge colours per polygon ID | S | 15–30 min | — |
-| **T4b** | Fog | M | 1–2 h | — |
+| **T4b** | ~~Fog~~ done in Azahar (`fog 0` turns it off); check on hardware | S | ~5 min (your time at the 3DS) | — |
 | **T4c** | Toon and highlight shading | S | 30–60 min | — |
 | **T4d** | Anti-aliasing | M | 1–2 h | — |
 | **T4e** | Translucent polygon sorting | M | 1–2 h | — |
@@ -228,7 +228,7 @@ history so far, for example:
 | **T6a** | Threads (`OS_CreateThread`) | M | 2–4 h | — |
 | **T6b** | Soft reset | S–M | 30 min–2 h | — |
 | **T6c** | Real interrupts (VBlank as an event, not a call in `OS_WaitIrq`) | L ⚠ | 4–8 h | T6a |
-| **T7a** | Overlay 7's WINOUT address leftover | S | 15–45 min | — |
+| **T7a** | ~~Overlay 7's WINOUT address leftover~~ done (`87c9e94`) | — | — | — |
 | **T7b** | Mosaic | M | 1–2 h | — |
 | **T7c** | Bitmap sprites | S | 30–60 min | — |
 | **T7d** | H-blank (raster) effects | M | 2–4 h | — |
@@ -247,7 +247,7 @@ history so far, for example:
 | **T14** | ~~Bottom screen's blended layers drawn solid~~ fixed in Azahar; check on hardware | S | ~5 min (your time at the 3DS) | — |
 | **T15** | Stereoscopic 3D speed: revisit once T3 is done (no interim fixes) | — | — | T3c |
 
-**Quick wins (under an hour each):** T2, T4a, T4c, T4f, T7a, T7c, T12a, T12c, T13, and T1 if
+**Quick wins (under an hour each):** T2, T4a, T4c, T4f, T7c, T12a, T12c, T13, and T1 if
 the state diff finds the bug quickly.
 
 ### Native 3D: how the 3D tasks relate
@@ -332,7 +332,14 @@ native path still has to compute those on the CPU, even when the GPU does the dr
 **T4a–h: Missing 3D effects**
 - **T4a, edge colours:** today one edge colour is used for all polygon IDs. HGSS sets all eight
   alike, so the visible gain is small.
-- **T4b, fog:** fog colour and density table, per-polygon fog flag.
+- **T4b, fog (done; check on hardware):** density table, colour and per-polygon flag through the
+  PICA's fog unit. Fog resolves after the opaque scene because unfogged translucent polygons clear
+  it per pixel, which is how Morty's gym shows its candlelit room. Checked in Azahar in that gym,
+  rain (Route 33), snow (Mt. Silver summit), a Flash cave (Dark Cave) and the dimmed Battle
+  Arcade, and with stereo on. Not modelled: alpha-only fog (no game call found) and fogging of
+  alpha. Flash caves fog to alpha 0, so on the DS their dark areas are transparent; here they're
+  opaque black, which differs only if a 2D layer behind them isn't black.
+  `debug.txt`: `fog 0` off, `fog 2` shows fogged pixels in red.
 - **T4c, toon and highlight shading:** a table lookup on vertex colour.
 - **T4d, anti-aliasing:** the field turns it on (DISP3DCNT bit 4). The DS smooths polygon edges.
   The GPU can approximate this by supersampling the 3D layer.
@@ -356,8 +363,10 @@ native path still has to compute those on the CPU, even when the GPU does the dr
   `OS_WaitIrq`. A design change with timing risk.
 
 **T7a–e: 2D gaps**
-- **T7a, WINOUT leftover:** overlay 7 derives bits from WINOUT's moved address
-  (`lsr r1, r0, #13`) and gets different bits than on the DS.
+- **T7a, WINOUT leftover (done):** overlay 7 shifts WINOUT's address to get the bit 0x2000.
+  `_shifted_io_literals` in `mwasm2gas.py` (`87c9e94`) rewrites such shifts so the moved address
+  gives the DS's bits. A pattern scan of the built assembly (2026-11-23) found no missed shifts;
+  its one match, `0x0400E000` in the trainer AI, is a flag mask rather than an address.
 - **T7b, mosaic.**
 - **T7c, bitmap sprites.**
 - **T7d, H-blank effects:** per-line register changes, such as wavy screens.
